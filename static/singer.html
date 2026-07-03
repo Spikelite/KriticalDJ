@@ -21,6 +21,12 @@ h1{font-size:18px;margin:0 0 4px}
 #addform input{font-size:14px;padding:6px 10px;border-radius:8px;border:1px solid #333;background:var(--bg);color:var(--text);width:130px}
 #q{width:100%;font-size:20px;padding:10px 12px;border-radius:10px;border:1px solid #333;background:var(--bg);color:var(--text)}
 #q:focus{outline:2px solid var(--accent)}
+.filters{display:flex;gap:6px;margin-top:8px}
+.filters button{font-size:13px;padding:6px 14px;border-radius:999px;border:1px solid #3a3f47;background:var(--bg);color:var(--dim);cursor:pointer}
+.filters button.on{background:var(--accent);color:#00222f;border-color:var(--accent);font-weight:600}
+.alpha{display:flex;gap:3px;margin-top:8px;flex-wrap:wrap}
+.alpha button{flex:1;min-width:26px;font-size:12px;padding:5px 0;border-radius:6px;border:1px solid #3a3f47;background:var(--bg);color:var(--dim);cursor:pointer}
+.alpha button.on{background:var(--accent);color:#00222f;border-color:var(--accent);font-weight:700}
 section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;padding:12px 14px 4px;margin:0}
 .row{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);cursor:pointer}
 .row .t{flex:1;min-width:0}
@@ -41,6 +47,8 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 <div id="now"></div>
 <div class="names" id="names"><span class="lbl">I am:</span></div>
 <input id="q" type="search" placeholder="Search artist or song&hellip;" autocomplete="off">
+<div class="filters" id="filters"><button data-f="all" class="on">All</button><button data-f="artist">Artist</button><button data-f="title">Song title</button></div>
+<div class="alpha" id="alpha"></div>
 </header>
 <section id="minewrap" style="display:none"><h2>My songs</h2><div id="mine"></div></section>
 <section><h2 id="reshead">Songs</h2><div id="meta"></div><div id="results"></div></section>
@@ -129,13 +137,31 @@ function renderState(){
 }
 function addPos(parent, text){ const s=document.createElement("span"); s.id="mypos"; s.textContent=text; parent.appendChild(s); }
 
+// search filters: field pills (All / Artist / Song title) + A-Z artist browse
+let FIELD="all", LETTER="";
+$("filters").addEventListener("click",e=>{
+  const f=e.target.dataset.f; if(!f) return;
+  FIELD=f;
+  [...$("filters").children].forEach(b=>b.classList.toggle("on",b.dataset.f===f));
+  search();
+});
+"#ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").forEach(ch=>{
+  const b=document.createElement("button"); b.textContent=ch;
+  b.onclick=()=>{ LETTER=(LETTER===ch)?"":ch;
+    [...$("alpha").children].forEach(x=>x.classList.toggle("on",x.textContent===LETTER));
+    search(); };
+  $("alpha").appendChild(b);
+});
+
 // search
 let timer=null;
 $("q").addEventListener("input",()=>{ clearTimeout(timer); timer=setTimeout(search,180); });
 function search(){
   const q=$("q").value.trim();
-  fetch("/api/songs?limit=60&q="+encodeURIComponent(q)).then(r=>r.json()).then(d=>{
-    $("reshead").textContent = q ? "Results" : "Browse";
+  fetch("/api/songs?limit=60&q="+encodeURIComponent(q)
+        +"&field="+FIELD+"&letter="+encodeURIComponent(LETTER))
+   .then(r=>r.json()).then(d=>{
+    $("reshead").textContent = (q||LETTER) ? "Results" : "Browse";
     $("meta").textContent = d.total===0 ? "No matches." :
       (d.total>d.songs.length ? d.total.toLocaleString()+" matches — showing "+d.songs.length+". Keep typing." :
        d.total.toLocaleString()+(d.total===1?" match.":" matches."));

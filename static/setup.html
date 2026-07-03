@@ -46,6 +46,12 @@ td:first-child{color:var(--dim);width:46%}
 </section>
 
 <section>
+  <h2>Statistics</h2>
+  <p id="stotal">&hellip;</p>
+  <table id="stats"></table>
+</section>
+
+<section>
   <h2>Configuration <span style="text-transform:none;letter-spacing:0">(edit <code>config.json</code> and restart to change)</span></h2>
   <table id="cfg"></table>
 </section>
@@ -76,6 +82,21 @@ function refresh(){
   });
   fetch("/api/songs?limit=1").then(r=>r.json()).then(d=>{
     $("count").textContent = d.total.toLocaleString();
+  });
+  fetch("/api/stats/summary").then(r=>r.json()).then(d=>{
+    $("stotal").textContent = d.events
+      ? d.events.toLocaleString() + " events recorded across " + d.sessions + " session" + (d.sessions===1?"":"s")
+      : "No history yet — stats start recording with the first queued song.";
+    const t = $("stats"); t.textContent = "";
+    const rows = [];
+    d.top_played.slice(0,5).forEach(([s,n],i)=>rows.push(["Most played #"+(i+1), s+"  ("+n+"×)"]));
+    d.top_singers.slice(0,5).forEach(([s,n],i)=>rows.push(["Top singer #"+(i+1), s+"  ("+n+" songs)"]));
+    for(const [k,v] of rows){
+      const tr=document.createElement("tr");
+      const a=document.createElement("td"); a.textContent=k;
+      const b=document.createElement("td"); b.textContent=v;
+      tr.appendChild(a); tr.appendChild(b); t.appendChild(tr);
+    }
   });
 }
 

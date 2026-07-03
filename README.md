@@ -21,11 +21,15 @@ Then open, in a browser:
 
 | URL | Who | What |
 |---|---|---|
-| `/` | Singers (BYOD phones/tablets) | Search the library, pick your name, queue songs |
-| `/kj` | The KJ (host machine) | Play / Pause / Skip, Start-now, manage the queue |
+| `/` | Singers (BYOD phones/tablets) | Search the library (all / artist / song title, A–Z browse), pick your name, queue songs |
+| `/kj` | The KJ (host machine) | Play / Pause / Skip, Start-now, lyrics-sync nudge, queue & rotation management, queue-length summary |
 | `/screen` | The TV/projector (fullscreen browser) | Lyrics during songs; NOW / NEXT / rotation + QR between songs |
+| `/setup` | The KJ, before/after the party | Rescan library, reset session, statistics, config overview |
 
 No accounts, no auth — it's a karaoke party, the honor system runs the door.
+
+Deploying on a Raspberry Pi (systemd service, dual-screen Chromium kiosk,
+Bluetooth audio calibration): see [DEPLOY.md](DEPLOY.md).
 
 ## How the rotation works
 
@@ -40,6 +44,15 @@ Queue, singers, rotation position, and playback phase are journaled to
 `state.json` on every change. After a power failure the party resumes at the
 intermission board with the interrupted song back at the front of the line.
 Singer names last for the session (KJ can reset for the next party).
+
+## Statistics
+
+Every queue/play/skip/remove is appended to `stats.jsonl` (crash-safe,
+fire-and-forget — stats can never interrupt the music), tied to a persistent
+singer identity in `singers.json`: names are unique case-insensitively and a
+returning name reattaches to its id across parties, while session resets only
+ever clear the rotation. `/setup` shows the running tallies (most played,
+top singers); the raw log is plain JSON-lines for any deeper analysis.
 
 ## Config
 

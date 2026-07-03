@@ -1,0 +1,14 @@
+[Unit]
+Description=KriticalDJ karaoke server
+After=network.target local-fs.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/KriticalDJ
+ExecStart=/usr/bin/python3 /home/pi/KriticalDJ/kriticaldj.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

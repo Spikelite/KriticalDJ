@@ -4,8 +4,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from kriticaldj import (State, move_entry, move_singer, parse_title, pick_next,
-                        scan_library)
+from kriticaldj import (Flow, SingerRegistry, State, Stats, move_entry,
+                        move_singer, parse_title, pick_next, scan_library)
 
 E = lambda i, s: {"id": i, "singer": s, "song_id": "x"}
 
@@ -138,6 +138,42 @@ def test_snapshot_shapes():
         assert snap["phase"] == "idle"
         assert snap["next"]["singer"] == "Ann"  # rotation starts at cursor 0
         assert [e["singer"] for e in snap["upcoming"]] == ["Ann", "Bob"]
+
+
+def test_singer_registry_reattach():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "singers.json"
+        reg = SingerRegistry(p)
+        name1, id1 = reg.resolve("Ann")
+        name2, id2 = reg.resolve("ann")   # case-insensitive: same singer
+        assert (name2, id2) == ("Ann", id1)
+        _, id3 = reg.resolve("Bob")
+        assert id3 != id1
+        reg2 = SingerRegistry(p)          # survives restart
+        assert reg2.resolve("ANN")[1] == id1
+
+
+def test_stats_events_and_skip_vs_complete():
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        reg = SingerRegistry(td / "singers.json")
+        stats = Stats(td / "stats.jsonl", reg)
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(td / "state.json")
+        flow = Flow(st, songs, {"intermission_seconds": 1}, stats)
+        st.mutate(songs, lambda: (st.singers.append("Ann"),
+                                  st.queue.append(E(1, "Ann"))))
+        stats.log("queued", "Ann", flow._info("x"))
+        flow._begin_next()                # -> started
+        flow.skip()                       # -> skipped
+        st.mutate(songs, lambda: st.queue.append(E(2, "Ann")))
+        flow._begin_next()                # -> started
+        flow.song_ended()                 # -> completed
+        rows = [json.loads(l) for l in (td / "stats.jsonl").read_text().splitlines()]
+        assert [r["event"] for r in rows] == \
+            ["queued", "started", "skipped", "started", "completed"]
+        assert all(r["singer_id"] == rows[0]["singer_id"] for r in rows)
+        assert rows[2]["title"] == "T" and rows[2]["artist"] == "A"
 
 
 if __name__ == "__main__":

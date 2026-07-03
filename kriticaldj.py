@@ -16,7 +16,9 @@ import socket
 import sys
 import threading
 import time
+import uuid
 import zipfile
+from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Empty, Queue
@@ -121,10 +123,14 @@ def scan_library(music_root: str) -> dict:
 
     def add(rel: str, artist: str, title: str, **media) -> None:
         sid = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:12]
+        sa, st = _searchable(artist), _searchable(title)
         songs[sid] = {
             "artist": artist,
             "title": title,
-            "search": _searchable(f"{artist} {title}"),
+            "search": (sa + " " + st).strip(),
+            "sa": sa,   # field-scoped search
+            "st": st,
+            "ltr": sa[:1].upper() if sa[:1].isalpha() else "#",  # A-Z browse
             **media,
         }
 
@@ -197,6 +203,74 @@ def pick_next(singers: list, cursor: int, entries: list):
             if e["singer"] == singers[idx]:
                 return e, (idx + 1) % len(singers)
     return None, cursor
+
+
+class SingerRegistry:
+    """Persistent singer identities (singers.json).
+
+    Names are unique case-insensitively and a returning name reattaches to its
+    existing id, so statistics accumulate across parties (honor system, like
+    everything else). Session resets clear the rotation, NEVER this registry --
+    stats rows reference these ids forever."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.by_key: dict = {}
+        if path.exists():
+            try:
+                self.by_key = json.loads(path.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                self.by_key = {}
+
+    def resolve(self, name: str) -> tuple:
+        """(display_name, singer_id) -- creates the singer on first sight,
+        reattaches on any later casing of the same name."""
+        key = name.strip().casefold()
+        with self.lock:
+            rec = self.by_key.get(key)
+            now = round(time.time(), 3)
+            if rec is None:
+                rec = {"name": name.strip(), "id": uuid.uuid4().hex[:10],
+                       "first_seen": now, "last_seen": now}
+                self.by_key[key] = rec
+            else:
+                rec["last_seen"] = now
+            try:
+                tmp = self.path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(self.by_key, indent=1, ensure_ascii=False),
+                               encoding="utf-8")
+                os.replace(tmp, self.path)
+            except OSError:
+                pass
+            return rec["name"], rec["id"]
+
+
+class Stats:
+    """Append-only party history (stats.jsonl): one JSON line per event
+    (queued / started / completed / skipped / removed / session_reset).
+    Fire-and-forget -- a stats failure must never interrupt the music."""
+
+    def __init__(self, path: Path, registry: SingerRegistry):
+        self.path = path
+        self.registry = registry
+        self.lock = threading.Lock()
+
+    def log(self, event: str, singer: str = "", song: dict = None) -> None:
+        try:
+            row = {"ts": round(time.time(), 3),
+                   "iso": time.strftime("%Y-%m-%d %H:%M:%S"),
+                   "event": event}
+            if singer:
+                row["singer"], row["singer_id"] = self.registry.resolve(singer)
+            if song:
+                row["song_id"] = song.get("song_id", "")
+                row["artist"] = song.get("artist", "")
+                row["title"] = song.get("title", "")
+            with self.lock, open(self.path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
 
 
 def move_entry(entries: list, entry_id: int, direction: int) -> bool:
@@ -330,12 +404,19 @@ class State:
 # Flow control: the server owns the clock
 
 class Flow:
-    def __init__(self, state: State, songs: dict, cfg: dict):
+    def __init__(self, state: State, songs: dict, cfg: dict, stats: Stats = None):
         self.state, self.songs, self.cfg = state, songs, cfg
+        self.stats = stats
+
+    def _info(self, song_id: str) -> dict:
+        s = self.songs.get(song_id, {})
+        return {"song_id": song_id, "artist": s.get("artist", "?"),
+                "title": s.get("title", "?")}
 
     def _begin_next(self) -> None:
         """Move the next rotation entry on stage (caller holds no lock)."""
         st = self.state
+        began = []
 
         def fn():
             e, st.cursor = pick_next(st.singers, st.cursor, st.queue)
@@ -346,16 +427,24 @@ class Flow:
             st.now = e
             st.phase = "playing"
             st.transport = {"cmd": "play", "seq": st.transport["seq"] + 1}
+            began.append(e)
         st.mutate(self.songs, fn)
+        if began and self.stats:
+            self.stats.log("started", began[0]["singer"], self._info(began[0]["song_id"]))
 
-    def song_ended(self) -> None:
+    def song_ended(self, event: str = "completed") -> None:
         st = self.state
+        ended = []
 
         def fn():
+            if st.now is not None:
+                ended.append(st.now)
             st.now = None
             st.phase = "intermission"
             st.deadline = time.time() + self.cfg["intermission_seconds"]
         st.mutate(self.songs, fn)
+        if ended and self.stats:
+            self.stats.log(event, ended[0]["singer"], self._info(ended[0]["song_id"]))
 
     def start_now(self) -> None:
         st = self.state
@@ -374,7 +463,7 @@ class Flow:
         st.mutate(self.songs, fn)
 
     def skip(self) -> None:
-        self.song_ended()
+        self.song_ended("skipped")
 
     def tick_forever(self) -> None:
         """Background thread: advance phases whose deadline has passed, and
@@ -404,7 +493,8 @@ _PLACEHOLDER = ("<!DOCTYPE html><meta charset='utf-8'><title>KriticalDJ</title>"
                 "is live: <a style='color:#4fc3f7' href='/api/state'>/api/state</a></p>")
 
 
-def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flow):
+def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flow,
+                 registry: SingerRegistry, stats: Stats):
     media_cache = ROOT / ".media-cache"
     static_dir = ROOT / "static"
     # search order fixed once; sorting 50k+ rows per request would sting on a Pi
@@ -570,13 +660,44 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                                    "intermission_seconds": cfg["intermission_seconds"],
                                    "start_now_countdown_seconds": cfg["start_now_countdown_seconds"],
                                    "lyrics_offset_ms": cfg["lyrics_offset_ms"]})
+            if u.path == "/api/stats/summary":
+                played, queued, singers_c = Counter(), Counter(), Counter()
+                events = resets = 0
+                try:
+                    with open(stats.path, encoding="utf-8") as f:
+                        for line in f:
+                            try:
+                                row = json.loads(line)
+                            except ValueError:
+                                continue
+                            events += 1
+                            ev = row.get("event")
+                            label = f"{row.get('artist', '?')} — {row.get('title', '?')}"
+                            if ev == "completed":
+                                played[label] += 1
+                                singers_c[row.get("singer", "?")] += 1
+                            elif ev == "queued":
+                                queued[label] += 1
+                            elif ev == "session_reset":
+                                resets += 1
+                except OSError:
+                    pass
+                return self._json({"events": events, "sessions": resets + 1,
+                                   "top_played": played.most_common(10),
+                                   "top_queued": queued.most_common(10),
+                                   "top_singers": singers_c.most_common(10)})
             if u.path == "/api/songs":
                 qs = parse_qs(u.query)
                 toks = _searchable(" ".join(qs.get("q", [""]))).split()
+                field = qs.get("field", ["all"])[0]
+                letter = qs.get("letter", [""])[0].upper()[:1]
                 limit = min(int(qs.get("limit", ["50"])[0]), 200)
+                key = {"artist": "sa", "title": "st"}.get(field, "search")
                 out, total = [], 0
                 for sid, s in ordered:
-                    if any(t not in s["search"] for t in toks):
+                    if letter and s["ltr"] != letter:
+                        continue
+                    if any(t not in s[key] for t in toks):
                         continue
                     total += 1
                     if len(out) < limit:
@@ -595,20 +716,22 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
             u = urlparse(self.path)
             body = self._body()
             if u.path == "/api/singers":
-                name = (body.get("name") or "").strip()[:40]
-                if not name:
+                raw = (body.get("name") or "").strip()[:40]
+                if not raw:
                     return self._json({"error": "name required"}, 400)
+                name, _sid = registry.resolve(raw)  # canonical casing, stable id
 
                 def fn():
                     if name not in state.singers:
                         state.singers.append(name)
                 state.mutate(songs, fn)
-                return self._json({"ok": True, "singers": state.singers})
+                return self._json({"ok": True, "name": name, "singers": state.singers})
             if u.path == "/api/queue":
                 sid = body.get("song_id")
-                singer = (body.get("singer") or "").strip()[:40]
-                if sid not in songs or not singer:
+                raw = (body.get("singer") or "").strip()[:40]
+                if sid not in songs or not raw:
                     return self._json({"error": "song_id and singer required"}, 400)
+                singer, _ = registry.resolve(raw)
 
                 def fn():
                     if singer not in state.singers:
@@ -617,6 +740,7 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                                         "singer": singer, "song_id": sid})
                     state.next_entry_id += 1
                 state.mutate(songs, fn)
+                stats.log("queued", singer, flow._info(sid))
                 return self._json({"ok": True})
             if u.path == "/api/screen/ended":
                 flow.song_ended()
@@ -639,13 +763,17 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 return self._json({"ok": moved[0]})
             if u.path == "/api/kj/singer_remove":
                 name = (body.get("name") or "").strip()
+                dropped = []
                 def fn():
                     if name in state.singers:
                         state.singers.remove(name)
+                    dropped.extend(e for e in state.queue if e["singer"] == name)
                     state.queue = [e for e in state.queue if e["singer"] != name]
                     if state.cursor >= len(state.singers):
                         state.cursor = 0
                 state.mutate(songs, fn)
+                for e in dropped:
+                    stats.log("removed", e["singer"], flow._info(e["song_id"]))
                 return self._json({"ok": True})
             if u.path == "/api/kj/reset":
                 def fn():
@@ -656,6 +784,7 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                     state.phase = "idle"
                     state.deadline = 0.0
                 state.mutate(songs, fn)
+                stats.log("session_reset")  # party boundary marker for summaries
                 return self._json({"ok": True})
             if u.path == "/api/kj/rescan":
                 fresh = scan_library(cfg["music_root"])  # fs walk outside the lock
@@ -697,10 +826,14 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
             if not m:
                 return self._json({"error": "not found"}, 404)
             eid = int(m.group(1))
+            dropped = []
 
             def fn():
+                dropped.extend(e for e in state.queue if e["id"] == eid)
                 state.queue = [e for e in state.queue if e["id"] != eid]
             state.mutate(songs, fn)
+            for e in dropped:
+                stats.log("removed", e["singer"], flow._info(e["song_id"]))
             return self._json({"ok": True})
 
     return Handler
@@ -717,10 +850,13 @@ def main() -> None:
     print(f"[{APP}] {len(songs)} songs indexed")
     state = State(ROOT / "state.json")
     state.extra["lyrics_offset_ms"] = cfg["lyrics_offset_ms"]
-    flow = Flow(state, songs, cfg)
+    registry = SingerRegistry(ROOT / "singers.json")
+    stats = Stats(ROOT / "stats.jsonl", registry)
+    flow = Flow(state, songs, cfg, stats)
     threading.Thread(target=flow.tick_forever, daemon=True).start()
     server = ThreadingHTTPServer((cfg["host"], cfg["port"]),
-                                 make_handler(cfg, cfg_path, state, songs, flow))
+                                 make_handler(cfg, cfg_path, state, songs, flow,
+                                              registry, stats))
     server.daemon_threads = True
     print(f"[{APP}] singers: {lan_url(cfg)}  |  KJ: {lan_url(cfg)}kj  |  screen: {lan_url(cfg)}screen")
     server.serve_forever()

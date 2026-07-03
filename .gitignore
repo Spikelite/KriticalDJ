@@ -5,3 +5,5 @@ state.tmp
 .media-cache/
 test-fixture/
 test-config.json
+singers.json
+stats.jsonl
