@@ -32,6 +32,9 @@ DEFAULT_CONFIG = {
     "party_name": "Karaoke Night",
     "intermission_seconds": 30,
     "start_now_countdown_seconds": 3,
+    # Rendering leads Bluetooth audio by the sink's latency; this shifts CDG
+    # frames relative to audio.currentTime. Calibrate from the KJ console.
+    "lyrics_offset_ms": 0,
     "public_url": "",
 }
 
@@ -470,7 +473,8 @@ def make_handler(cfg: dict, state: State, songs: dict, flow: Flow):
                 return self._json({"party_name": cfg["party_name"],
                                    "public_url": lan_url(cfg),
                                    "intermission_seconds": cfg["intermission_seconds"],
-                                   "start_now_countdown_seconds": cfg["start_now_countdown_seconds"]})
+                                   "start_now_countdown_seconds": cfg["start_now_countdown_seconds"],
+                                   "lyrics_offset_ms": cfg["lyrics_offset_ms"]})
             if u.path == "/api/songs":
                 qs = parse_qs(u.query)
                 terms = _norm(" ".join(qs.get("q", [""])))

@@ -43,6 +43,31 @@ tested checkpoint and this file records exactly where we are.
   `/screen`, encoding the server URL (config `public_url` overrides the
   auto-detected LAN address; LAN has no internet, private hostnames fine).
 
+## Target hardware (decided)
+
+Raspberry Pi 4 running the server. Dual HDMI: an LCD for the KJ (`/kj`) and a
+TV for singers (`/screen`, fullscreen Chromium). Audio out over **Bluetooth**
+to a speaker that also handles mics and mixing. LAN only, no internet.
+
+Consequences:
+- **BT latency (100-300ms) means lyrics would lead the audio.** Config
+  `lyrics_offset_ms` shifts CDG rendering relative to `audio.currentTime`;
+  the KJ console gets live +/- nudge buttons to calibrate by ear (Phase 3/4).
+- Startup scan of a ~54k-file tree on a Pi over USB takes seconds -- fine, but
+  the `index.json` sidecar (below) also makes boot near-instant.
+- Deployment notes (Phase 5): systemd unit + Chromium kiosk autostart on the
+  TV output.
+
+## Library index sidecar (decided)
+
+Filename-derived names carry original-stem noise; song-sorter's cache has the
+curated strings. Rather than coupling to the 94MB cache, **song-sorter's
+Final-final will also emit a small `index.json` into the output root**
+(entries: relative path, artist, title, duration_seconds). KriticalDJ's
+scanner uses `music_root/index.json` when present and falls back to the
+folder scan otherwise. Small task on each side (song-sorter: extend
+`tracks_to_keep`; here: extend `scan_library`).
+
 ## Config (`config.json`, created with defaults on first run)
 
 | key | default | meaning |
@@ -72,7 +97,9 @@ tested checkpoint and this file records exactly where we are.
       test). *Done: all endpoints exercised end-to-end with curl.*
 - [ ] **Phase 2 — singer UI** (`/`): search/browse (songbook-style UX), singer
       name picker (tap an existing name or add yours), queue + my-songs view,
-      live rotation position ("you're 3rd").
+      live rotation position ("you're 3rd"). Plus: `index.json` sidecar
+      support in `scan_library` (and the matching emitter in song-sorter's
+      Final-final, done in that repo).
 - [ ] **Phase 3 — screen** (`/screen`): vendor cdgraphics + QR libs; CDG
       canvas playback synced to audio; intermission board (NOW / NEXT / queue
       + QR + countdown); idle board when queue empty.

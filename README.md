@@ -52,6 +52,7 @@ Singer names last for the session (KJ can reset for the next party).
 | `party_name` | `Karaoke Night` | shown on all surfaces |
 | `intermission_seconds` | `30` | pause between songs |
 | `start_now_countdown_seconds` | `3` | countdown after the KJ hits Start now |
+| `lyrics_offset_ms` | `0` | shift lyrics to match Bluetooth speaker latency (KJ-adjustable) |
 | `public_url` | *(auto-detected)* | URL encoded in the on-screen QR code |
 
 ## Status
