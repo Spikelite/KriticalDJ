@@ -1,0 +1,7 @@
+__pycache__/
+config.json
+state.json
+state.tmp
+.media-cache/
+test-fixture/
+test-config.json
