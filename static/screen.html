@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>KriticalDJ Screen</title>
+<style>
+:root{--bg:#0b0d10;--text:#e8eaed;--dim:#9aa0a6;--accent:#4fc3f7;--ok:#7bd88f}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,Arial,sans-serif;overflow:hidden;cursor:none}
+.view{display:none;position:absolute;inset:0}
+body[data-view="play"] #play{display:block}
+body[data-view="board"] #board{display:flex}
+body[data-view="count"] #count{display:flex}
+
+/* ---- playback view ---- */
+#play{background:#000}
+#cdg{position:absolute;inset:0;margin:auto;height:100%;aspect-ratio:25/18;max-width:100%;
+ image-rendering:pixelated;image-rendering:crisp-edges}
+#playhdr{position:absolute;top:0;left:0;right:0;padding:10px 20px;font-size:22px;color:#fff;
+ background:linear-gradient(rgba(0,0,0,.65),transparent);display:flex;gap:12px;opacity:.9}
+#playhdr b{color:var(--accent)}
+#playhdr .nxt{margin-left:auto;color:var(--dim);font-size:18px;align-self:center}
+
+/* ---- intermission / idle board ---- */
+#board{flex-direction:row;padding:4vh 4vw;gap:4vw}
+#board .left{flex:1.4;display:flex;flex-direction:column;min-width:0}
+#board .right{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2vh}
+#party{font-size:3.2vh;color:var(--dim);letter-spacing:.08em;text-transform:uppercase}
+.lbl{font-size:2.4vh;color:var(--dim);text-transform:uppercase;letter-spacing:.1em;margin-top:3.5vh}
+#nowname{font-size:8.5vh;font-weight:800;color:var(--accent);line-height:1.05;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#nowsong{font-size:4vh;margin-top:.5vh;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#nextline{font-size:3.4vh;margin-top:.5vh;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#nextline b{color:var(--ok)}
+#rot{margin-top:1vh;font-size:2.8vh;color:var(--dim);line-height:1.7;overflow:hidden}
+#rot b{color:var(--text);font-weight:600}
+#timer{font-size:9vh;font-weight:800;color:var(--ok);font-variant-numeric:tabular-nums}
+#qr{background:#fff;padding:1.6vh;border-radius:2vh;line-height:0}
+#qr svg{width:26vh;height:26vh;display:block}
+#url{font-size:2.6vh;color:var(--accent)}
+#hint{font-size:2.4vh;color:var(--dim);text-align:center}
+
+/* ---- start-now countdown ---- */
+#count{align-items:center;justify-content:center;flex-direction:column;gap:2vh;background:var(--bg)}
+#bignum{font-size:34vh;font-weight:800;color:var(--accent);font-variant-numeric:tabular-nums;line-height:1}
+#countwho{font-size:5vh}
+#countwho b{color:var(--accent)}
+
+/* ---- audio unlock gate ---- */
+#gate{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+ background:rgba(0,0,0,.85);z-index:9;font-size:4vh;color:var(--accent);cursor:pointer}
+</style>
+</head>
+<body data-view="board">
+<div class="view" id="play">
+  <canvas id="cdg" width="300" height="216"></canvas>
+  <div id="playhdr"></div>
+</div>
+<div class="view" id="board">
+  <div class="left">
+    <div id="party">Karaoke</div>
+    <div class="lbl" id="nowlbl">Grab the mic</div>
+    <div id="nowname">&nbsp;</div>
+    <div id="nowsong">&nbsp;</div>
+    <div id="nextline">&nbsp;</div>
+    <div class="lbl">Rotation</div>
+    <div id="rot"></div>
+  </div>
+  <div class="right">
+    <div id="timer"></div>
+    <div id="qr"></div>
+    <div id="url"></div>
+    <div id="hint">Scan to pick your song and join the rotation</div>
+  </div>
+</div>
+<div class="view" id="count">
+  <div id="bignum">3</div>
+  <div id="countwho"></div>
+</div>
+<div id="gate">&#128266; Tap once to enable sound</div>
+<script src="/static/cdgraphics.js"></script>
+<script src="/static/qrcode.js"></script>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let CFG = {lyrics_offset_ms: 0};
+let STATE = null;
+let clockOff = 0;            // server_time - local time, for countdown accuracy
+let lastSeq = -1;            // transport command sequence already applied
+let curEntry = null;         // entry currently loaded on stage
+let cdg = null, cdgReady = false;
+const audio = new Audio();
+audio.preload = "auto";
+const ctx = $("cdg").getContext("2d");
+
+fetch("/api/config").then(r => r.json()).then(c => {
+  CFG = c;
+  $("party").textContent = c.party_name;
+  const url = c.public_url;
+  $("url").textContent = url.replace(/^https?:\/\//, "").replace(/\/$/, "");
+  const q = qrcode(0, "M");
+  q.addData(url);
+  q.make();
+  $("qr").innerHTML = q.createSvgTag({cellSize: 4, margin: 0, scalable: true});
+});
+
+// ---- audio unlock (browser autoplay policy) --------------------------------
+function tryPlay() {
+  audio.play().then(() => { $("gate").style.display = "none"; })
+    .catch(() => { $("gate").style.display = "flex"; });
+}
+$("gate").onclick = () => tryPlay();
+
+// ---- song loading + CDG render loop ----------------------------------------
+async function loadSong(entry) {
+  curEntry = entry;
+  cdgReady = false;
+  ctx.clearRect(0, 0, 300, 216);
+  $("playhdr").textContent = "";
+  const b = document.createElement("b");
+  b.textContent = entry.singer;
+  $("playhdr").appendChild(b);
+  $("playhdr").appendChild(document.createTextNode("  " + entry.title + " — " + entry.artist));
+  const nxt = document.createElement("span");
+  nxt.className = "nxt";
+  nxt.id = "hdrnext";
+  $("playhdr").appendChild(nxt);
+  audio.src = "/media/" + entry.song_id + "/mp3";
+  try {
+    const r = await fetch("/media/" + entry.song_id + "/cdg");
+    if (!r.ok) throw new Error("no cdg");
+    cdg = new CDGraphics(await r.arrayBuffer());
+    cdgReady = true;
+  } catch (e) {
+    cdg = null;  // audio-only fallback: header stays, canvas dark
+  }
+  tryPlay();
+}
+
+function renderLoop() {
+  requestAnimationFrame(renderLoop);
+  if (!cdgReady || !cdg) return;
+  const t = Math.max(0, audio.currentTime - (CFG.lyrics_offset_ms || 0) / 1000);
+  try {
+    const frame = cdg.render(t);
+    if (frame.isChanged) ctx.putImageData(frame.imageData, 0, 0);
+  } catch (e) { /* corrupt packet streams shouldn't kill the loop */ }
+}
+renderLoop();
+
+audio.addEventListener("ended", () => {
+  fetch("/api/screen/ended", {method: "POST"});
+});
+
+// ---- countdown ticking ------------------------------------------------------
+setInterval(() => {
+  if (!STATE) return;
+  const remain = Math.max(0, STATE.deadline - (Date.now() / 1000 + clockOff));
+  if (STATE.phase === "intermission") {
+    $("timer").textContent = STATE.upcoming.length ? Math.ceil(remain) : "";
+  } else if (STATE.phase === "countdown") {
+    $("bignum").textContent = Math.max(1, Math.ceil(remain));
+  }
+}, 200);
+
+// ---- state application ------------------------------------------------------
+function apply() {
+  const st = STATE;
+  clockOff = st.server_time - Date.now() / 1000;
+
+  if (st.phase === "playing" && st.now) {
+    document.body.dataset.view = "play";
+    if (!curEntry || curEntry.id !== st.now.id) loadSong(st.now);
+    const nxt = $("hdrnext");
+    if (nxt) nxt.textContent = st.next ? ("next: " + st.next.singer) : "";
+  } else {
+    if (!audio.paused) audio.pause();
+    if (st.phase !== "countdown") curEntry = null;
+    document.body.dataset.view = st.phase === "countdown" ? "count" : "board";
+  }
+
+  // transport commands (KJ play/pause) -- only newly issued ones
+  if (st.transport.seq !== lastSeq) {
+    const isNew = lastSeq !== -1;
+    lastSeq = st.transport.seq;
+    if (isNew && st.phase === "playing") {
+      if (st.transport.cmd === "pause") audio.pause();
+      else tryPlay();
+    }
+  }
+
+  // intermission / idle board
+  const up = st.upcoming || [];
+  if (up.length) {
+    $("nowlbl").textContent = "Grab the mic";
+    $("nowname").textContent = up[0].singer;
+    $("nowsong").textContent = up[0].title + " — " + up[0].artist;
+    $("nextline").textContent = "";
+    if (up[1]) {
+      $("nextline").appendChild(document.createTextNode("Up next: "));
+      const b = document.createElement("b");
+      b.textContent = up[1].singer;
+      $("nextline").appendChild(b);
+      $("nextline").appendChild(document.createTextNode(" — " + up[1].title));
+    }
+    const rot = $("rot");
+    rot.textContent = "";
+    for (const e of up.slice(2, 8)) {
+      const d = document.createElement("div");
+      const b = document.createElement("b");
+      b.textContent = e.singer;
+      d.appendChild(b);
+      d.appendChild(document.createTextNode(" — " + e.title));
+      rot.appendChild(d);
+    }
+  } else {
+    $("nowlbl").textContent = st.singers.length ? "Queue is empty" : "Welcome";
+    $("nowname").textContent = "Pick a song!";
+    $("nowsong").textContent = "";
+    $("nextline").textContent = "";
+    $("rot").textContent = "";
+    $("timer").textContent = "";
+  }
+
+  // start-now countdown labels
+  if (st.phase === "countdown" && up.length) {
+    $("countwho").textContent = "";
+    const b = document.createElement("b");
+    b.textContent = up[0].singer;
+    $("countwho").appendChild(b);
+    $("countwho").appendChild(document.createTextNode(" — " + up[0].title));
+  }
+}
+
+const es = new EventSource("/events");
+es.onmessage = e => { STATE = JSON.parse(e.data); apply(); };
+</script>
+</body>
+</html>

@@ -100,13 +100,37 @@ folder scan otherwise. Small task on each side (song-sorter: extend
       `index.json` support in `scan_library` (emitter added in song-sorter).
       *Code complete + API smoke-tested; on-device browser validation deferred
       to the user's next test pass.*
-- [ ] **Phase 3 — screen** (`/screen`): vendor cdgraphics + QR libs; CDG
-      canvas playback synced to audio; intermission board (NOW / NEXT / queue
-      + QR + countdown); idle board when queue empty.
+- [x] **Phase 3 — screen** (`/screen`): vendored `cdgraphics` 7.0.0 (ISC)
+      and `qrcode-generator` 1.4.4 (MIT) into `static/`; CDG canvas playback
+      synced to audio with `lyrics_offset_ms` compensation; audio-unlock gate
+      (autoplay policy); intermission board (grab-the-mic NOW / up NEXT /
+      rotation list / QR / countdown); idle board; start-now big-number
+      countdown; transport (play/pause) applied via SSE seq; POSTs
+      /api/screen/ended. *Code complete + endpoints smoke-tested; VISUAL
+      validation with real CDG files pending user's test pass.*
 - [ ] **Phase 4 — KJ console** (`/kj`): transport buttons, start-now, queue
       reorder/remove, singer management, session reset, rescan library.
 - [ ] **Phase 5 — polish**: pitch-free niceties only if wanted (volume duck on
-      pause, next-singer audio chime, config UI). GitHub upload.
+      pause, next-singer audio chime, config UI). GitHub upload. Cleanup
+      backlog: singer UI songbook-parity search (All/Artist/Title filter pills
+      + A–Z browse bar, like song-sorter's songbook).
+- [ ] **Phase 6 — statistics system** (future feature, requested): record
+      what gets picked and what actually gets played, tied to singer identity.
+      - **Event log**: append-only `stats.jsonl`, one JSON line per event
+        (`ts`, `event`, `singer_id`, `song_id`, artist/title snapshot).
+        Events: `queued`, `started`, `completed`, `skipped`, `removed`.
+        Append-only = crash-safe and trivially analyzable later; writes are
+        fire-and-forget so stats can never block the party flow.
+      - **Singer identity**: today singers are bare per-session names. Add a
+        persistent `singers.json` registry (name -> {id, first_seen,
+        last_seen}); names are enforced unique, and a returning name
+        reattaches to its existing id (honor system, same as everything
+        else). Session reset clears the *rotation*, never the registry.
+        This keeps the door open for a more robust ID system later without
+        rewriting history — stats rows reference the id, not the name.
+      - **Future queries this enables**: most-picked / most-played songs,
+        skip rate per song, singer histories ("your favorites"), per-party
+        summaries, "play it again" shortcuts in the singer UI.
 
 ## Notes for future sessions
 
@@ -115,6 +139,10 @@ folder scan otherwise. Small task on each side (song-sorter: extend
 - The Final-final output tree's artist folders are lowercase (clean names);
   the scanner title-cases them for display. Song titles parse from the file
   stem (`CATALOG - Artist - Title` variants handled heuristically).
+- Screen restart/refresh mid-song restarts the current track from 0:00 (the
+  screen owns the playback clock). Acceptable v1 behavior.
+- Chromium kiosk should launch with `--autoplay-policy=no-user-gesture-required`
+  (else the one-tap audio gate handles it).
 - song-sorter's songbook stays a static file; KriticalDJ's `/` replaces it at
   parties. (Optionally the songbook generator could later gain a mode that
   links to KriticalDJ, but the built-in UI makes that unnecessary.)
