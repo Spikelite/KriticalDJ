@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KJ Console</title>
+<style>
+:root{--bg:#14161a;--panel:#1e2128;--text:#e8eaed;--dim:#9aa0a6;--accent:#4fc3f7;--ok:#7bd88f;--warn:#e57373;--line:#22252c}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,Arial,sans-serif}
+header{position:sticky;top:0;background:var(--panel);padding:10px 16px;z-index:2;box-shadow:0 2px 8px rgba(0,0,0,.5)}
+h1{font-size:17px;margin:0 0 2px}
+h1 small{color:var(--dim);font-weight:normal;margin-left:8px}
+#status{font-size:14px;color:var(--dim);min-height:18px}
+#status b{color:var(--accent)}
+#status .cd{color:var(--ok);font-weight:700;font-variant-numeric:tabular-nums}
+.bar{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.bar button{font-size:16px;padding:12px 18px;border-radius:10px;border:1px solid #3a3f47;
+ background:var(--bg);color:var(--text);cursor:pointer;min-width:86px}
+.bar button:active{background:#2a2e36}
+.bar .go{background:var(--ok);color:#03240f;font-weight:700;border-color:var(--ok)}
+.sync{display:flex;gap:6px;align-items:center;margin-top:10px;font-size:14px;color:var(--dim);flex-wrap:wrap}
+.sync button{font-size:14px;padding:6px 10px;border-radius:8px;border:1px solid #3a3f47;background:var(--bg);color:var(--text);cursor:pointer}
+.sync b{color:var(--accent);min-width:64px;text-align:center;font-variant-numeric:tabular-nums}
+section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;padding:14px 16px 4px;margin:0}
+.row{display:flex;align-items:center;gap:8px;padding:8px 16px;border-bottom:1px solid var(--line);font-size:15px}
+.row .n{color:var(--dim);min-width:22px;text-align:right}
+.row .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row .t b{color:var(--accent)}
+.row button{font-size:14px;padding:4px 10px;border-radius:7px;border:1px solid #3a3f47;background:var(--bg);color:var(--dim);cursor:pointer}
+.row button.x{color:var(--warn)}
+.chips{display:flex;gap:6px;flex-wrap:wrap;padding:8px 16px}
+.chip{display:flex;align-items:center;gap:4px;background:var(--panel);border:1px solid #3a3f47;border-radius:999px;padding:5px 6px 5px 13px;font-size:14px}
+.chip button{border:none;background:none;color:var(--dim);cursor:pointer;font-size:13px;padding:2px 5px}
+.chip button.x{color:var(--warn)}
+#danger{display:flex;gap:10px;padding:16px;border-top:1px solid var(--line);margin-top:14px}
+#danger button{font-size:14px;padding:10px 14px;border-radius:8px;border:1px solid #3a3f47;background:var(--bg);color:var(--dim);cursor:pointer}
+#reset.arm{background:var(--warn);color:#2a0505;font-weight:700;border-color:var(--warn)}
+.empty{color:var(--dim);font-size:14px;padding:8px 16px}
+</style>
+</head>
+<body>
+<header>
+  <h1>KJ Console <small id="party"></small></h1>
+  <div id="status"></div>
+  <div class="bar">
+    <button onclick="api('play')">&#9654; Play</button>
+    <button onclick="api('pause')">&#10074;&#10074; Pause</button>
+    <button onclick="api('skip')">&#9197; Skip</button>
+    <button class="go" onclick="api('start_now')">&#128640; Start now</button>
+  </div>
+  <div class="sync">Lyrics sync
+    <button onclick="offset(-50)">-50</button>
+    <button onclick="offset(-10)">-10</button>
+    <b id="off">0 ms</b>
+    <button onclick="offset(10)">+10</button>
+    <button onclick="offset(50)">+50</button>
+    <span>(+ = delay lyrics for Bluetooth lag)</span>
+  </div>
+</header>
+
+<section><h2>Rotation (play order)</h2><div id="up"></div></section>
+<section><h2>Singers (rotation order)</h2><div class="chips" id="singers"></div></section>
+<section><h2>Queue by singer</h2><div id="queue"></div></section>
+<div id="danger">
+  <button id="rescan" onclick="rescan()">&#8635; Rescan library</button>
+  <button id="reset" onclick="reset()">Reset session</button>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let STATE = null, clockOff = 0, resetArmed = null;
+
+fetch("/api/config").then(r=>r.json()).then(c=>{ $("party").textContent = c.party_name; });
+
+function api(cmd){ fetch("/api/kj/"+cmd, {method:"POST"}); }
+function post(path, body){ fetch(path, {method:"POST", body:JSON.stringify(body)}); }
+function offset(d){ post("/api/kj/offset", {delta:d}); }
+function entryMove(id,d){ post("/api/kj/entry_move", {entry_id:id, dir:d}); }
+function singerMove(n,d){ post("/api/kj/singer_move", {name:n, dir:d}); }
+function singerKick(n){ if(confirm("Remove "+n+" and their queued songs?")) post("/api/kj/singer_remove",{name:n}); }
+function delEntry(id){ fetch("/api/queue/"+id, {method:"DELETE"}); }
+function rescan(){
+  $("rescan").textContent = "Scanning…";
+  fetch("/api/kj/rescan",{method:"POST"}).then(r=>r.json())
+    .then(d=>{ $("rescan").textContent = "↻ Rescan library ("+d.count.toLocaleString()+" songs)"; });
+}
+function reset(){
+  const b = $("reset");
+  if(!resetArmed){
+    b.classList.add("arm"); b.textContent = "Really reset? (clears queue + singers)";
+    resetArmed = setTimeout(()=>{ b.classList.remove("arm"); b.textContent="Reset session"; resetArmed=null; }, 4000);
+    return;
+  }
+  clearTimeout(resetArmed); resetArmed = null;
+  b.classList.remove("arm"); b.textContent = "Reset session";
+  fetch("/api/kj/reset",{method:"POST"});
+}
+
+function mkbtn(txt, cls, fn){ const b=document.createElement("button"); b.textContent=txt;
+  if(cls) b.className=cls; b.onclick=fn; return b; }
+
+function render(){
+  const st = STATE; if(!st) return;
+  // header status
+  const s = $("status"); s.textContent = "";
+  const phase = st.phase.toUpperCase();
+  if(st.phase === "playing" && st.now){
+    s.appendChild(document.createTextNode("▶ PLAYING"+(st.transport.cmd==="pause"?" (paused)":"")+": "));
+    const b = document.createElement("b"); b.textContent = st.now.singer; s.appendChild(b);
+    s.appendChild(document.createTextNode(" — "+st.now.title));
+  } else {
+    s.appendChild(document.createTextNode(phase+" "));
+    const cd = document.createElement("span"); cd.className = "cd"; cd.id = "cd"; s.appendChild(cd);
+    if(st.next){
+      s.appendChild(document.createTextNode("  next: "));
+      const b = document.createElement("b"); b.textContent = st.next.singer; s.appendChild(b);
+      s.appendChild(document.createTextNode(" — "+st.next.title));
+    }
+  }
+  if(st.lyrics_offset_ms != null) $("off").textContent = st.lyrics_offset_ms+" ms";
+
+  // rotation preview
+  const up = $("up"); up.textContent = "";
+  (st.upcoming||[]).forEach((e,i)=>{
+    const r = document.createElement("div"); r.className = "row";
+    const n = document.createElement("div"); n.className = "n"; n.textContent = (i+1)+"."; r.appendChild(n);
+    const t = document.createElement("div"); t.className = "t";
+    const b = document.createElement("b"); b.textContent = e.singer; t.appendChild(b);
+    t.appendChild(document.createTextNode(" — "+e.title+" ("+e.artist+")")); r.appendChild(t);
+    r.appendChild(mkbtn("✕","x",()=>delEntry(e.id)));
+    up.appendChild(r);
+  });
+  if(!(st.upcoming||[]).length){ const d=document.createElement("div"); d.className="empty"; d.textContent="Nothing queued."; up.appendChild(d); }
+
+  // singers
+  const sg = $("singers"); sg.textContent = "";
+  st.singers.forEach(name=>{
+    const c = document.createElement("span"); c.className = "chip";
+    c.appendChild(document.createTextNode(name));
+    c.appendChild(mkbtn("↑","",()=>singerMove(name,-1)));
+    c.appendChild(mkbtn("↓","",()=>singerMove(name,1)));
+    c.appendChild(mkbtn("✕","x",()=>singerKick(name)));
+    sg.appendChild(c);
+  });
+  if(!st.singers.length){ const d=document.createElement("div"); d.className="empty"; d.textContent="No singers yet."; sg.appendChild(d); }
+
+  // queue grouped by singer (each singer's personal FIFO)
+  const q = $("queue"); q.textContent = "";
+  const groups = new Map();
+  (st.queue||[]).forEach(e=>{ if(!groups.has(e.singer)) groups.set(e.singer,[]); groups.get(e.singer).push(e); });
+  for(const [name, entries] of groups){
+    const h = document.createElement("div"); h.className = "row";
+    const t = document.createElement("div"); t.className = "t";
+    const b = document.createElement("b"); b.textContent = name; t.appendChild(b);
+    t.appendChild(document.createTextNode("  ("+entries.length+")")); h.appendChild(t);
+    q.appendChild(h);
+    entries.forEach(e=>{
+      const r = document.createElement("div"); r.className = "row";
+      const n = document.createElement("div"); n.className = "n"; r.appendChild(n);
+      const tt = document.createElement("div"); tt.className = "t";
+      tt.textContent = e.title+" ("+e.artist+")"; r.appendChild(tt);
+      r.appendChild(mkbtn("↑","",()=>entryMove(e.id,-1)));
+      r.appendChild(mkbtn("↓","",()=>entryMove(e.id,1)));
+      r.appendChild(mkbtn("✕","x",()=>delEntry(e.id)));
+      q.appendChild(r);
+    });
+  }
+  if(!groups.size){ const d=document.createElement("div"); d.className="empty"; d.textContent="Queue is empty."; q.appendChild(d); }
+}
+
+setInterval(()=>{
+  if(!STATE) return;
+  const el = $("cd"); if(!el) return;
+  if(STATE.phase==="intermission" || STATE.phase==="countdown"){
+    const remain = Math.max(0, STATE.deadline - (Date.now()/1000 + clockOff));
+    el.textContent = Math.ceil(remain)+"s";
+  } else el.textContent = "";
+}, 250);
+
+const es = new EventSource("/events");
+es.onmessage = e => { STATE = JSON.parse(e.data); clockOff = STATE.server_time - Date.now()/1000; render(); };
+</script>
+</body>
+</html>

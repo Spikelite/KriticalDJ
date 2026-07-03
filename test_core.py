@@ -4,7 +4,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from kriticaldj import State, parse_title, pick_next, scan_library
+from kriticaldj import (State, move_entry, move_singer, parse_title, pick_next,
+                        scan_library)
 
 E = lambda i, s: {"id": i, "singer": s, "song_id": "x"}
 
@@ -68,6 +69,24 @@ def test_scan_pairs_and_zips():
         assert vals[2]["title"] == "Kokomo" and "zip" in vals[2]
         # ids stable across rescans
         assert set(songs) == set(scan_library(str(root)))
+
+
+def test_move_entry_same_singer_only():
+    q = [E(1, "Ann"), E(2, "Bob"), E(3, "Ann"), E(4, "Bob")]
+    # moving Ann's #3 up must hop over Bob's #2 and swap with Ann's #1
+    assert move_entry(q, 3, -1)
+    assert [e["id"] for e in q] == [3, 2, 1, 4]
+    # Bob's #4 down: no same-singer sibling below -> no-op
+    assert not move_entry(q, 4, 1)
+    assert not move_entry(q, 99, -1)  # unknown id
+
+
+def test_move_singer():
+    s = ["Ann", "Bob", "Cal"]
+    assert move_singer(s, "Cal", -1) and s == ["Ann", "Cal", "Bob"]
+    assert not move_singer(s, "Ann", -1)  # already first
+    assert not move_singer(s, "Bob", 1)   # already last
+    assert not move_singer(s, "Zoe", 1)   # unknown
 
 
 def test_scan_prefers_sidecar():

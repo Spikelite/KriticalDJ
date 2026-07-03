@@ -87,6 +87,10 @@ folder scan otherwise. Small task on each side (song-sorter: extend
 - `POST /api/queue {"song_id","singer"}` — queue a song (auto-registers singer)
 - `DELETE /api/queue/<entry_id>` — remove an entry
 - `POST /api/kj/play|pause|skip|start_now` — transport (KJ)
+- `POST /api/kj/entry_move {"entry_id","dir"}` — reorder within a singer's FIFO
+- `POST /api/kj/singer_move {"name","dir"}` / `singer_remove {"name"}` — rotation order
+- `POST /api/kj/reset` — clear session; `POST /api/kj/rescan` — reindex library
+- `POST /api/kj/offset {"delta"}` — nudge lyrics_offset_ms (persisted + live)
 - `POST /api/screen/ended` — screen reports song finished
 - `GET /media/<song_id>/mp3|cdg` — media with HTTP Range support
 
@@ -108,8 +112,13 @@ folder scan otherwise. Small task on each side (song-sorter: extend
       countdown; transport (play/pause) applied via SSE seq; POSTs
       /api/screen/ended. *Code complete + endpoints smoke-tested; VISUAL
       validation with real CDG files pending user's test pass.*
-- [ ] **Phase 4 — KJ console** (`/kj`): transport buttons, start-now, queue
-      reorder/remove, singer management, session reset, rescan library.
+- [x] **Phase 4 — KJ console** (`/kj`): transport bar (Play/Pause/Skip/
+      Start-now), live lyrics-sync nudge buttons (-50/-10/+10/+50 ms,
+      persisted to config + broadcast live to the screen), rotation preview
+      with per-entry remove, singer chips with reorder/kick (kick drops their
+      queued songs), per-singer queue FIFO reorder, two-step session reset,
+      library rescan. *All endpoints smoke-tested end-to-end; browser pass
+      pending user.* MVP COMPLETE — phases 1-4 all code-complete.
 - [ ] **Phase 5 — polish**: pitch-free niceties only if wanted (volume duck on
       pause, next-singer audio chime, config UI). GitHub upload. Cleanup
       backlog: singer UI songbook-parity search (All/Artist/Title filter pills

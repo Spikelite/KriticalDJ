@@ -199,6 +199,33 @@ def pick_next(singers: list, cursor: int, entries: list):
     return None, cursor
 
 
+def move_entry(entries: list, entry_id: int, direction: int) -> bool:
+    """KJ reorder: swap a queue entry with its neighbor from the SAME singer
+    (rotation order between singers is the singers list's job). Returns True
+    if anything moved."""
+    idx = next((i for i, e in enumerate(entries) if e["id"] == entry_id), None)
+    if idx is None:
+        return False
+    rng = range(idx - 1, -1, -1) if direction < 0 else range(idx + 1, len(entries))
+    for j in rng:
+        if entries[j]["singer"] == entries[idx]["singer"]:
+            entries[idx], entries[j] = entries[j], entries[idx]
+            return True
+    return False
+
+
+def move_singer(singers: list, name: str, direction: int) -> bool:
+    """KJ reorder of the rotation itself: move a singer up/down one slot."""
+    if name not in singers:
+        return False
+    i = singers.index(name)
+    j = i + (1 if direction > 0 else -1)
+    if j < 0 or j >= len(singers):
+        return False
+    singers[i], singers[j] = singers[j], singers[i]
+    return True
+
+
 class State:
     """All mutable party state, guarded by one lock, journaled to disk."""
 
@@ -206,6 +233,7 @@ class State:
         self.path = path
         self.lock = threading.RLock()
         self.listeners: list[Queue] = []
+        self.extra: dict = {}  # config-derived live values merged into snapshots
         self.singers: list[str] = []
         self.queue: list[dict] = []      # {id, singer, song_id}
         self.cursor = 0                  # rotation position in self.singers
@@ -282,7 +310,7 @@ class State:
                     "artist": s.get("artist", "?"), "title": s.get("title", "?")}
         with self.lock:
             up = self.rotation_preview()
-            return {
+            out = {
                 "phase": self.phase,
                 "deadline": self.deadline,
                 "server_time": time.time(),
@@ -293,6 +321,8 @@ class State:
                 "singers": list(self.singers),
                 "transport": dict(self.transport),
             }
+            out.update(self.extra)
+            return out
 
 
 # --------------------------------------------------------------------------
@@ -373,7 +403,7 @@ _PLACEHOLDER = ("<!DOCTYPE html><meta charset='utf-8'><title>KriticalDJ</title>"
                 "is live: <a style='color:#4fc3f7' href='/api/state'>/api/state</a></p>")
 
 
-def make_handler(cfg: dict, state: State, songs: dict, flow: Flow):
+def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flow):
     media_cache = ROOT / ".media-cache"
     static_dir = ROOT / "static"
     # search order fixed once; sorting 50k+ rows per request would sting on a Pi
@@ -588,6 +618,64 @@ def make_handler(cfg: dict, state: State, songs: dict, flow: Flow):
             if u.path == "/api/screen/ended":
                 flow.song_ended()
                 return self._json({"ok": True})
+            if u.path == "/api/kj/entry_move":
+                moved = []
+                def fn():
+                    moved.append(move_entry(state.queue,
+                                            int(body.get("entry_id", -1)),
+                                            int(body.get("dir", 0))))
+                state.mutate(songs, fn)
+                return self._json({"ok": moved[0]})
+            if u.path == "/api/kj/singer_move":
+                moved = []
+                def fn():
+                    moved.append(move_singer(state.singers,
+                                             (body.get("name") or "").strip(),
+                                             int(body.get("dir", 0))))
+                state.mutate(songs, fn)
+                return self._json({"ok": moved[0]})
+            if u.path == "/api/kj/singer_remove":
+                name = (body.get("name") or "").strip()
+                def fn():
+                    if name in state.singers:
+                        state.singers.remove(name)
+                    state.queue = [e for e in state.queue if e["singer"] != name]
+                    if state.cursor >= len(state.singers):
+                        state.cursor = 0
+                state.mutate(songs, fn)
+                return self._json({"ok": True})
+            if u.path == "/api/kj/reset":
+                def fn():
+                    state.queue = []
+                    state.singers = []
+                    state.cursor = 0
+                    state.now = None
+                    state.phase = "idle"
+                    state.deadline = 0.0
+                state.mutate(songs, fn)
+                return self._json({"ok": True})
+            if u.path == "/api/kj/rescan":
+                fresh = scan_library(cfg["music_root"])  # fs walk outside the lock
+                def fn():
+                    songs.clear()
+                    songs.update(fresh)
+                    ordered[:] = sorted(songs.items(),
+                                        key=lambda kv: (kv[1]["artist"].lower(),
+                                                        kv[1]["title"].lower()))
+                state.mutate(songs, fn)
+                return self._json({"ok": True, "count": len(songs)})
+            if u.path == "/api/kj/offset":
+                delta = int(body.get("delta", 0))
+                def fn():
+                    v = int(cfg.get("lyrics_offset_ms", 0)) + delta
+                    cfg["lyrics_offset_ms"] = max(-2000, min(2000, v))
+                    state.extra["lyrics_offset_ms"] = cfg["lyrics_offset_ms"]
+                state.mutate(songs, fn)
+                try:  # calibration should survive a restart
+                    cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+                except OSError:
+                    pass
+                return self._json({"ok": True, "lyrics_offset_ms": cfg["lyrics_offset_ms"]})
             if u.path.startswith("/api/kj/"):
                 cmd = u.path.rsplit("/", 1)[1]
                 if cmd in ("play", "pause"):
@@ -625,9 +713,11 @@ def main() -> None:
     songs = scan_library(cfg["music_root"])
     print(f"[{APP}] {len(songs)} songs indexed")
     state = State(ROOT / "state.json")
+    state.extra["lyrics_offset_ms"] = cfg["lyrics_offset_ms"]
     flow = Flow(state, songs, cfg)
     threading.Thread(target=flow.tick_forever, daemon=True).start()
-    server = ThreadingHTTPServer((cfg["host"], cfg["port"]), make_handler(cfg, state, songs, flow))
+    server = ThreadingHTTPServer((cfg["host"], cfg["port"]),
+                                 make_handler(cfg, cfg_path, state, songs, flow))
     server.daemon_threads = True
     print(f"[{APP}] singers: {lan_url(cfg)}  |  KJ: {lan_url(cfg)}kj  |  screen: {lan_url(cfg)}screen")
     server.serve_forever()

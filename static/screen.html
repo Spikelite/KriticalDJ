@@ -147,7 +147,9 @@ async function loadSong(entry) {
 function renderLoop() {
   requestAnimationFrame(renderLoop);
   if (!cdgReady || !cdg) return;
-  const t = Math.max(0, audio.currentTime - (CFG.lyrics_offset_ms || 0) / 1000);
+  const off = (STATE && STATE.lyrics_offset_ms != null)
+    ? STATE.lyrics_offset_ms : (CFG.lyrics_offset_ms || 0);  // live KJ nudges
+  const t = Math.max(0, audio.currentTime - off / 1000);
   try {
     const frame = cdg.render(t);
     if (frame.isChanged) ctx.putImageData(frame.imageData, 0, 0);
