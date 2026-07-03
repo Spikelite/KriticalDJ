@@ -81,6 +81,11 @@ def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s.lower())
 
 
+def _searchable(s: str) -> str:
+    """Lowercase, punctuation-free, token-preserving text for search fields."""
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", s.lower())).strip()
+
+
 def parse_title(stem: str, artist_hint: str) -> str:
     """Best-effort song title from a filename stem like
     'SC8121-03 - Some Artist - Song Title'."""
@@ -100,11 +105,15 @@ def parse_title(stem: str, artist_hint: str) -> str:
 
 
 def scan_library(music_root: str) -> dict:
-    """Index mp3+cdg pairs and zips under music_root.
+    """Index the library under music_root.
 
-    Returns {song_id: {artist, title, search, mp3, cdg, zip}} where media
-    values are absolute paths (zip singles carry the archive path instead).
-    Song ids are stable across rescans (hash of the relative path)."""
+    Preferred source: a curated `index.json` sidecar in the root (emitted by
+    song-sorter's Final-final) with entries {path, artist, title, duration} --
+    clean display names and instant startup. Fallback: walk the tree for
+    mp3+cdg pairs and zips, parsing names from filenames.
+
+    Returns {song_id: {artist, title, search, duration?, mp3|zip, ...}} with
+    absolute media paths. Song ids are stable (hash of the relative path)."""
     import hashlib
 
     root = Path(music_root)
@@ -115,9 +124,27 @@ def scan_library(music_root: str) -> dict:
         songs[sid] = {
             "artist": artist,
             "title": title,
-            "search": _norm(f"{artist} {title}"),
+            "search": _searchable(f"{artist} {title}"),
             **media,
         }
+
+    sidecar = root / "index.json"
+    if sidecar.exists():
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+            for e in data.get("songs", []):
+                p = root / e["path"]
+                if not p.is_file():
+                    continue
+                media = {"zip": str(p)} if p.suffix.lower() == ".zip" else {"mp3": str(p)}
+                if e.get("duration"):
+                    media["duration"] = int(e["duration"])
+                add(e["path"], e.get("artist", "?"), e.get("title", "?"), **media)
+        except (ValueError, OSError, KeyError, TypeError):
+            songs = {}
+        if songs:
+            print(f"[{APP}] curated index.json: {len(songs)} songs")
+            return songs
 
     for p in sorted(root.rglob("*")):
         if not p.is_file():
@@ -348,6 +375,10 @@ _PLACEHOLDER = ("<!DOCTYPE html><meta charset='utf-8'><title>KriticalDJ</title>"
 
 def make_handler(cfg: dict, state: State, songs: dict, flow: Flow):
     media_cache = ROOT / ".media-cache"
+    static_dir = ROOT / "static"
+    # search order fixed once; sorting 50k+ rows per request would sting on a Pi
+    ordered = sorted(songs.items(),
+                     key=lambda kv: (kv[1]["artist"].lower(), kv[1]["title"].lower()))
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -388,7 +419,25 @@ def make_handler(cfg: dict, state: State, songs: dict, flow: Flow):
                 return None
             if kind in s:
                 return Path(s[kind])
+            if kind == "cdg" and "mp3" in s:
+                # sidecar entries carry only the mp3 path; find the twin lazily
+                for suf in (".cdg", ".CDG", ".Cdg"):
+                    c = Path(s["mp3"]).with_suffix(suf)
+                    if c.exists():
+                        s["cdg"] = str(c)
+                        return c
+                return None
             if "zip" in s:  # extract once into the cache
+                if f"zip_{kind}" not in s:  # sidecar zips: discover members lazily
+                    with zipfile.ZipFile(s["zip"]) as z:
+                        for n in z.namelist():
+                            ln = n.lower()
+                            if ln.endswith(".mp3"):
+                                s.setdefault("zip_mp3", n)
+                            elif ln.endswith(".cdg"):
+                                s.setdefault("zip_cdg", n)
+                if f"zip_{kind}" not in s:
+                    return None
                 media_cache.mkdir(exist_ok=True)
                 out = media_cache / f"{song_id}.{kind}"
                 if not out.exists():
@@ -456,15 +505,28 @@ def make_handler(cfg: dict, state: State, songs: dict, flow: Flow):
                     pass
 
         # ---- routes ------------------------------------------------------
+        def _page(self, name: str, label: str):
+            f = static_dir / name
+            if f.exists():
+                return self._html(f.read_text(encoding="utf-8"))
+            return self._html(_PLACEHOLDER.format(page=label))
+
         def do_GET(self):
             u = urlparse(self.path)
             parts = [p for p in u.path.split("/") if p]
             if u.path == "/":
-                return self._html(_PLACEHOLDER.format(page="Singer"))
+                return self._page("singer.html", "Singer")
             if u.path == "/kj":
-                return self._html(_PLACEHOLDER.format(page="KJ console"))
+                return self._page("kj.html", "KJ console")
             if u.path == "/screen":
-                return self._html(_PLACEHOLDER.format(page="Screen"))
+                return self._page("screen.html", "Screen")
+            if len(parts) == 2 and parts[0] == "static":
+                f = (static_dir / parts[1]).resolve()
+                if f.is_file() and f.parent == static_dir.resolve():
+                    ctype = "text/javascript" if f.suffix == ".js" else "text/css" \
+                        if f.suffix == ".css" else "application/octet-stream"
+                    return self._serve_file(f, ctype)
+                return self._json({"error": "not found"}, 404)
             if u.path == "/events":
                 return self._events()
             if u.path == "/api/state":
@@ -477,17 +539,17 @@ def make_handler(cfg: dict, state: State, songs: dict, flow: Flow):
                                    "lyrics_offset_ms": cfg["lyrics_offset_ms"]})
             if u.path == "/api/songs":
                 qs = parse_qs(u.query)
-                terms = _norm(" ".join(qs.get("q", [""])))
-                limit = int(qs.get("limit", ["50"])[0])
-                out = []
-                for sid, s in songs.items():
-                    if terms and terms not in s["search"]:
+                toks = _searchable(" ".join(qs.get("q", [""]))).split()
+                limit = min(int(qs.get("limit", ["50"])[0]), 200)
+                out, total = [], 0
+                for sid, s in ordered:
+                    if any(t not in s["search"] for t in toks):
                         continue
-                    out.append({"song_id": sid, "artist": s["artist"], "title": s["title"]})
-                    if len(out) >= limit:
-                        break
-                out.sort(key=lambda x: (x["artist"].lower(), x["title"].lower()))
-                return self._json({"count": len(out), "songs": out})
+                    total += 1
+                    if len(out) < limit:
+                        out.append({"song_id": sid, "artist": s["artist"],
+                                    "title": s["title"], "duration": s.get("duration")})
+                return self._json({"total": total, "songs": out})
             if len(parts) == 3 and parts[0] == "media":
                 p = self._media_path(parts[1], parts[2])
                 if p and p.exists():

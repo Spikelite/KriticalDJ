@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Karaoke</title>
+<style>
+:root{--bg:#14161a;--panel:#1e2128;--text:#e8eaed;--dim:#9aa0a6;--accent:#4fc3f7;--line:#22252c;--ok:#7bd88f}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,Arial,sans-serif}
+header{position:sticky;top:0;background:var(--panel);padding:10px 12px;z-index:2;box-shadow:0 2px 8px rgba(0,0,0,.5)}
+h1{font-size:18px;margin:0 0 4px}
+#now{font-size:13px;color:var(--dim);min-height:17px;margin-bottom:8px}
+#now b{color:var(--accent)}
+#mypos{color:var(--ok);font-weight:600}
+.names{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;align-items:center}
+.names .lbl{font-size:12px;color:var(--dim);margin-right:2px}
+.names button{padding:7px 13px;border-radius:999px;border:1px solid #3a3f47;background:var(--bg);color:var(--dim);font-size:14px;cursor:pointer}
+.names button.me{background:var(--accent);color:#00222f;font-weight:700;border-color:var(--accent)}
+#addform{display:none;gap:6px}
+#addform input{font-size:14px;padding:6px 10px;border-radius:8px;border:1px solid #333;background:var(--bg);color:var(--text);width:130px}
+#q{width:100%;font-size:20px;padding:10px 12px;border-radius:10px;border:1px solid #333;background:var(--bg);color:var(--text)}
+#q:focus{outline:2px solid var(--accent)}
+section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;padding:12px 14px 4px;margin:0}
+.row{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);cursor:pointer}
+.row .t{flex:1;min-width:0}
+.row .title{font-size:17px}
+.row .artist{font-size:13px;color:var(--dim)}
+.row .dur{font-size:12px;color:var(--dim)}
+.row .add{font-size:22px;color:var(--accent);padding:0 4px}
+.row .del{font-size:18px;color:#e57373;padding:2px 8px;cursor:pointer}
+.row .pos{font-size:12px;color:var(--ok);min-width:34px;text-align:right}
+#meta{color:var(--dim);font-size:13px;padding:8px 14px}
+#toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--accent);color:#00222f;
+ padding:10px 18px;border-radius:999px;font-weight:700;opacity:0;transition:opacity .25s;pointer-events:none;max-width:90%}
+</style>
+</head>
+<body>
+<header>
+<h1 id="party">Karaoke</h1>
+<div id="now"></div>
+<div class="names" id="names"><span class="lbl">I am:</span></div>
+<input id="q" type="search" placeholder="Search artist or song&hellip;" autocomplete="off">
+</header>
+<section id="minewrap" style="display:none"><h2>My songs</h2><div id="mine"></div></section>
+<section><h2 id="reshead">Songs</h2><div id="meta"></div><div id="results"></div></section>
+<div id="toast"></div>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let ME = localStorage.getItem("kdj_name") || "";
+let STATE = null;
+
+fetch("/api/config").then(r=>r.json()).then(c=>{ $("party").textContent = c.party_name; document.title = c.party_name; });
+
+function toast(msg){ const t=$("toast"); t.textContent=msg; t.style.opacity=1; clearTimeout(t._h); t._h=setTimeout(()=>t.style.opacity=0,1800); }
+function esc(s){ return s; } // rendered via textContent only
+
+function setMe(name){ ME=name; localStorage.setItem("kdj_name",name); renderState(); }
+
+function renderNames(){
+  const box=$("names");
+  while(box.children.length>1) box.removeChild(box.lastChild);
+  const names=(STATE?STATE.singers:[]).slice();
+  if(ME && !names.includes(ME)) names.push(ME);
+  for(const n of names){
+    const b=document.createElement("button"); b.textContent=n;
+    if(n===ME) b.classList.add("me");
+    b.onclick=()=>setMe(n); box.appendChild(b);
+  }
+  const plus=document.createElement("button"); plus.textContent="+ add name";
+  plus.onclick=()=>{ form.style.display="flex"; plus.style.display="none"; form.querySelector("input").focus(); };
+  box.appendChild(plus);
+  const form=document.createElement("span"); form.id="addform";
+  const inp=document.createElement("input"); inp.placeholder="Your name"; inp.maxLength=40;
+  const ok=document.createElement("button"); ok.textContent="OK";
+  ok.onclick=()=>{ const v=inp.value.trim(); if(!v) return;
+    fetch("/api/singers",{method:"POST",body:JSON.stringify({name:v})})
+      .then(()=>{ setMe(v); toast("Welcome, "+v+"!"); }); };
+  inp.onkeydown=e=>{ if(e.key==="Enter") ok.onclick(); };
+  form.appendChild(inp); form.appendChild(ok); box.appendChild(form);
+}
+
+function songRow(s, opts){
+  const r=document.createElement("div"); r.className="row";
+  const t=document.createElement("div"); t.className="t";
+  const ti=document.createElement("div"); ti.className="title"; ti.textContent=s.title;
+  const ar=document.createElement("div"); ar.className="artist"; ar.textContent=s.artist;
+  t.appendChild(ti); t.appendChild(ar); r.appendChild(t);
+  if(s.duration){ const d=document.createElement("div"); d.className="dur";
+    d.textContent=Math.floor(s.duration/60)+":"+String(s.duration%60).padStart(2,"0"); r.appendChild(d); }
+  return r;
+}
+
+function renderState(){
+  if(!STATE){ renderNames(); return; }
+  renderNames();
+  // banner
+  const n=$("now"); n.textContent="";
+  if(STATE.phase==="playing" && STATE.now){
+    n.innerHTML="&#127908; ";
+    const b=document.createElement("b"); b.textContent=STATE.now.singer; n.appendChild(b);
+    n.appendChild(document.createTextNode(" is singing "+STATE.now.title));
+  } else if(STATE.next){
+    n.appendChild(document.createTextNode("Up next: "));
+    const b=document.createElement("b"); b.textContent=STATE.next.singer; n.appendChild(b);
+    n.appendChild(document.createTextNode(" — "+STATE.next.title));
+  } else {
+    n.textContent="Queue is empty — pick a song!";
+  }
+  if(ME){
+    const pos=STATE.upcoming.findIndex(e=>e.singer===ME);
+    if(pos===0 && STATE.phase!=="playing"){ n.appendChild(document.createTextNode("  ")); addPos(n,"You're up!"); }
+    else if(pos>=0){ addPos(n," · You're #"+(pos+1)); }
+    else if(STATE.now && STATE.now.singer===ME){ addPos(n," · That's you!"); }
+  }
+  // my songs
+  const mine=(STATE.queue||[]).filter(e=>e.singer===ME);
+  $("minewrap").style.display=mine.length?"block":"none";
+  const box=$("mine"); box.textContent="";
+  for(const e of mine){
+    const r=songRow(e,{});
+    const pos=STATE.upcoming.findIndex(u=>u.id===e.id);
+    const p=document.createElement("div"); p.className="pos"; p.textContent=pos>=0?("#"+(pos+1)):""; r.appendChild(p);
+    const x=document.createElement("div"); x.className="del"; x.textContent="✕";
+    x.onclick=ev=>{ ev.stopPropagation(); fetch("/api/queue/"+e.id,{method:"DELETE"}).then(()=>toast("Removed")); };
+    r.appendChild(x); r.style.cursor="default"; box.appendChild(r);
+  }
+}
+function addPos(parent, text){ const s=document.createElement("span"); s.id="mypos"; s.textContent=text; parent.appendChild(s); }
+
+// search
+let timer=null;
+$("q").addEventListener("input",()=>{ clearTimeout(timer); timer=setTimeout(search,180); });
+function search(){
+  const q=$("q").value.trim();
+  fetch("/api/songs?limit=60&q="+encodeURIComponent(q)).then(r=>r.json()).then(d=>{
+    $("reshead").textContent = q ? "Results" : "Browse";
+    $("meta").textContent = d.total===0 ? "No matches." :
+      (d.total>d.songs.length ? d.total.toLocaleString()+" matches — showing "+d.songs.length+". Keep typing." :
+       d.total.toLocaleString()+(d.total===1?" match.":" matches."));
+    const box=$("results"); box.textContent="";
+    for(const s of d.songs){
+      const r=songRow(s,{});
+      const add=document.createElement("div"); add.className="add"; add.textContent="+";
+      r.appendChild(add);
+      r.onclick=()=>queueSong(s);
+      box.appendChild(r);
+    }
+  });
+}
+function queueSong(s){
+  if(!ME){ toast("Pick your name first (top of screen)"); window.scrollTo({top:0,behavior:"smooth"}); return; }
+  fetch("/api/queue",{method:"POST",body:JSON.stringify({song_id:s.song_id,singer:ME})})
+    .then(r=>r.json()).then(d=>{ if(d.ok) toast("Queued for "+ME+" ✓"); else toast("Hmm, that didn't work"); });
+}
+
+const es=new EventSource("/events");
+es.onmessage=e=>{ STATE=JSON.parse(e.data); renderState(); };
+renderState();
+search();
+</script>
+</body>
+</html>

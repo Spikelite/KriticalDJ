@@ -95,11 +95,11 @@ folder scan otherwise. Small task on each side (song-sorter: extend
 - [x] **Phase 1 — server core** (scaffold, config, scanner, state journal,
       rotation engine, HTTP+SSE API, media serving, unit tests, live smoke
       test). *Done: all endpoints exercised end-to-end with curl.*
-- [ ] **Phase 2 — singer UI** (`/`): search/browse (songbook-style UX), singer
-      name picker (tap an existing name or add yours), queue + my-songs view,
-      live rotation position ("you're 3rd"). Plus: `index.json` sidecar
-      support in `scan_library` (and the matching emitter in song-sorter's
-      Final-final, done in that repo).
+- [x] **Phase 2 — singer UI** (`/`): search/browse, name picker, queue +
+      my-songs view with live rotation position, SSE-driven banner; sidecar
+      `index.json` support in `scan_library` (emitter added in song-sorter).
+      *Code complete + API smoke-tested; on-device browser validation deferred
+      to the user's next test pass.*
 - [ ] **Phase 3 — screen** (`/screen`): vendor cdgraphics + QR libs; CDG
       canvas playback synced to audio; intermission board (NOW / NEXT / queue
       + QR + countdown); idle board when queue empty.

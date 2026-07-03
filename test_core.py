@@ -70,6 +70,28 @@ def test_scan_pairs_and_zips():
         assert set(songs) == set(scan_library(str(root)))
 
 
+def test_scan_prefers_sidecar():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        d = root / "b" / "beach boys"
+        d.mkdir(parents=True)
+        mp3 = d / "sc81 - beach boys - barbara ann wvocal.mp3"  # noisy stem
+        mp3.write_bytes(b"m")
+        (d / "sc81 - beach boys - barbara ann wvocal.cdg").write_bytes(b"c")
+        (root / "index.json").write_text(json.dumps({"version": 1, "songs": [
+            {"path": "b/beach boys/sc81 - beach boys - barbara ann wvocal.mp3",
+             "artist": "The Beach Boys", "title": "Barbara Ann", "duration": 132},
+            {"path": "b/gone/missing.mp3", "artist": "X", "title": "Y"},  # skipped
+        ]}), encoding="utf-8")
+        songs = scan_library(str(root))
+        assert len(songs) == 1
+        s = list(songs.values())[0]
+        # curated names win over the noisy filename; duration carried through
+        assert s["artist"] == "The Beach Boys" and s["title"] == "Barbara Ann"
+        assert s["duration"] == 132 and s["mp3"].endswith(".mp3")
+        assert "beach" in s["search"] and "boys" in s["search"]  # token search
+
+
 def test_state_journal_and_crash_recovery():
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "state.json"
