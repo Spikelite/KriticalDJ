@@ -121,11 +121,18 @@ folder scan otherwise. Small task on each side (song-sorter: extend
       queued songs), per-singer queue FIFO reorder, two-step session reset,
       library rescan. *All endpoints smoke-tested end-to-end; browser pass
       pending user.* MVP COMPLETE — phases 1-4 all code-complete.
-- [ ] **Phase 5 — polish**: pitch-free niceties only if wanted (volume duck on
-      pause, next-singer audio chime, config UI). GitHub upload. Cleanup
-      backlog: singer UI songbook-parity search (All/Artist/Title filter pills
-      + A–Z browse bar, like song-sorter's songbook).
-- [ ] **Phase 6 — statistics system** (future feature, requested): record
+- [~] **Phase 5 — polish** (OPEN — user review findings land here):
+      - [x] singer UI songbook-parity search: All/Artist/Song-title filter
+            pills + A–Z artist browse (server: `field`/`letter` params on
+            /api/songs with precomputed per-field search text).
+      - [x] deployment docs: DEPLOY.md (Pi install, systemd service in
+            deploy/kriticaldj.service, dual-screen Chromium kiosk lines,
+            Bluetooth pairing + sync calibration, fstab nofail note).
+      - [ ] user's browser/hardware test-pass findings (TBD).
+      - [ ] GitHub upload (user does this after review).
+      - [ ] optional niceties only if wanted: volume duck on pause,
+            next-singer chime, config UI.
+- [x] **Phase 6 — statistics system** (DONE 2026-07-03): records
       what gets picked and what actually gets played, tied to singer identity.
       - **Event log**: append-only `stats.jsonl`, one JSON line per event
         (`ts`, `event`, `singer_id`, `song_id`, artist/title snapshot).
@@ -142,6 +149,13 @@ folder scan otherwise. Small task on each side (song-sorter: extend
       - **Future queries this enables**: most-picked / most-played songs,
         skip rate per song, singer histories ("your favorites"), per-party
         summaries, "play it again" shortcuts in the singer UI.
+      - *Implemented:* SingerRegistry (singers.json, case-insensitive unique
+        names, ids reattach across parties, resets never touch it) + Stats
+        (stats.jsonl append-only, events queued/started/completed/skipped/
+        removed/session_reset, fire-and-forget) wired through Flow and all
+        queue/kick/reset endpoints; singer names canonicalize through the
+        registry everywhere; GET /api/stats/summary aggregates (events,
+        sessions, top played/queued/singers) and /setup displays it.
 
 ## Notes for future sessions
 
