@@ -22,23 +22,27 @@ body[data-view="count"] #count{display:flex}
 #playhdr b{color:var(--accent)}
 #playhdr .nxt{margin-left:auto;color:var(--dim);font-size:18px;align-self:center}
 
-/* ---- intermission / idle board ---- */
-#board{flex-direction:row;padding:4vh 4vw;gap:4vw}
-#board .left{flex:1.4;display:flex;flex-direction:column;min-width:0}
-#board .right{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2vh}
-#party{font-size:3.2vh;color:var(--dim);letter-spacing:.08em;text-transform:uppercase}
-.lbl{font-size:2.4vh;color:var(--dim);text-transform:uppercase;letter-spacing:.1em;margin-top:3.5vh}
-#nowname{font-size:8.5vh;font-weight:800;color:var(--accent);line-height:1.05;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#nowsong{font-size:4vh;margin-top:.5vh;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#nextline{font-size:3.4vh;margin-top:.5vh;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#nextline b{color:var(--ok)}
-#rot{margin-top:1vh;font-size:2.8vh;color:var(--dim);line-height:1.7;overflow:hidden}
+/* ---- intermission / idle board ----
+   Top 2/5: grab-the-mic banner. Bottom 3/5: rotation left, QR packed right. */
+#board{flex-direction:column;padding:3vh 4vw;gap:2vh}
+#board .top{flex:0 0 40%;display:flex;flex-direction:column;justify-content:center;min-height:0}
+#board .bottom{flex:1;display:flex;flex-direction:row;gap:3vw;min-height:0}
+#board .rot-col{flex:1;min-width:0;display:flex;flex-direction:column}
+#board .qr-col{flex:0 0 auto;max-width:32vw;display:flex;flex-direction:column;
+ align-items:flex-end;justify-content:center;gap:1.4vh;text-align:right;margin-left:auto}
+#party{font-size:3vh;color:var(--dim);letter-spacing:.08em;text-transform:uppercase}
+.lbl{font-size:2.4vh;color:var(--dim);text-transform:uppercase;letter-spacing:.1em;margin-top:1.2vh}
+#nowname{font-size:10vh;font-weight:800;color:var(--accent);line-height:1.05;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#nowsong{font-size:4.5vh;margin-top:.5vh;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#rot{margin-top:1vh;font-size:3.2vh;color:var(--dim);line-height:1.75;overflow:hidden}
 #rot b{color:var(--text);font-weight:600}
-#timer{font-size:9vh;font-weight:800;color:var(--ok);font-variant-numeric:tabular-nums}
-#qr{background:#fff;padding:1.6vh;border-radius:2vh;line-height:0}
-#qr svg{width:26vh;height:26vh;display:block}
-#url{font-size:2.6vh;color:var(--accent)}
-#hint{font-size:2.4vh;color:var(--dim);text-align:center}
+#rot .next b{color:var(--ok)}
+#rot .next{color:var(--text)}
+#timer{font-size:8vh;font-weight:800;color:var(--ok);font-variant-numeric:tabular-nums;min-height:9vh}
+#qr{background:#fff;padding:1.4vh;border-radius:1.6vh;line-height:0}
+#qr svg{width:24vh;height:24vh;display:block}
+#url{font-size:2.5vh;color:var(--accent)}
+#hint{font-size:2.2vh;color:var(--dim)}
 
 /* ---- start-now countdown ---- */
 #count{align-items:center;justify-content:center;flex-direction:column;gap:2vh;background:var(--bg)}
@@ -57,20 +61,23 @@ body[data-view="count"] #count{display:flex}
   <div id="playhdr"></div>
 </div>
 <div class="view" id="board">
-  <div class="left">
+  <div class="top">
     <div id="party">Karaoke</div>
     <div class="lbl" id="nowlbl">Grab the mic</div>
     <div id="nowname">&nbsp;</div>
     <div id="nowsong">&nbsp;</div>
-    <div id="nextline">&nbsp;</div>
-    <div class="lbl">Rotation</div>
-    <div id="rot"></div>
   </div>
-  <div class="right">
-    <div id="timer"></div>
-    <div id="qr"></div>
-    <div id="url"></div>
-    <div id="hint">Scan to pick your song and join the rotation</div>
+  <div class="bottom">
+    <div class="rot-col">
+      <div class="lbl">Rotation</div>
+      <div id="rot"></div>
+    </div>
+    <div class="qr-col">
+      <div id="timer"></div>
+      <div id="qr"></div>
+      <div id="url"></div>
+      <div id="hint">Scan to pick your song and join the rotation</div>
+    </div>
   </div>
 </div>
 <div class="view" id="count">
@@ -191,34 +198,27 @@ function apply() {
 
   // intermission / idle board
   const up = st.upcoming || [];
+  const rot = $("rot");
+  rot.textContent = "";
   if (up.length) {
     $("nowlbl").textContent = "Grab the mic";
     $("nowname").textContent = up[0].singer;
     $("nowsong").textContent = up[0].title + " — " + up[0].artist;
-    $("nextline").textContent = "";
-    if (up[1]) {
-      $("nextline").appendChild(document.createTextNode("Up next: "));
-      const b = document.createElement("b");
-      b.textContent = up[1].singer;
-      $("nextline").appendChild(b);
-      $("nextline").appendChild(document.createTextNode(" — " + up[1].title));
-    }
-    const rot = $("rot");
-    rot.textContent = "";
-    for (const e of up.slice(2, 8)) {
+    // rotation list: everyone after the current mic-holder, singer — song;
+    // the first row (up next) is highlighted
+    up.slice(1, 10).forEach((e, i) => {
       const d = document.createElement("div");
+      if (i === 0) d.className = "next";
       const b = document.createElement("b");
       b.textContent = e.singer;
       d.appendChild(b);
       d.appendChild(document.createTextNode(" — " + e.title));
       rot.appendChild(d);
-    }
+    });
   } else {
     $("nowlbl").textContent = st.singers.length ? "Queue is empty" : "Welcome";
     $("nowname").textContent = "Pick a song!";
     $("nowsong").textContent = "";
-    $("nextline").textContent = "";
-    $("rot").textContent = "";
     $("timer").textContent = "";
   }
 
