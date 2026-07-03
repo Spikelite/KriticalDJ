@@ -307,7 +307,8 @@ class State:
         def song_view(e):
             s = songs.get(e["song_id"], {})
             return {"id": e["id"], "singer": e["singer"], "song_id": e["song_id"],
-                    "artist": s.get("artist", "?"), "title": s.get("title", "?")}
+                    "artist": s.get("artist", "?"), "title": s.get("title", "?"),
+                    "duration": s.get("duration")}
         with self.lock:
             up = self.rotation_preview()
             out = {
@@ -550,6 +551,8 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 return self._page("kj.html", "KJ console")
             if u.path == "/screen":
                 return self._page("screen.html", "Screen")
+            if u.path == "/setup":
+                return self._page("setup.html", "Setup")
             if len(parts) == 2 and parts[0] == "static":
                 f = (static_dir / parts[1]).resolve()
                 if f.is_file() and f.parent == static_dir.resolve():

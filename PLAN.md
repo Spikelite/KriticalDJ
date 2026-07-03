@@ -13,7 +13,9 @@ tested checkpoint and this file records exactly where we are.
   - `/` — singer UI (BYOD phones/tablets): browse/search library, pick or
     create a singer name, queue songs. Honor system, no auth.
   - `/kj` — KJ console (separate URL space, unlinked from singer UI):
-    Play / Pause / Skip / Next, Start-now button, queue management.
+    Play / Pause / Skip / Next, Start-now button, queue management. In-event
+    controls only; lifecycle actions live on `/setup` (rescan library, reset
+    session, config overview).
   - `/screen` — the TV/projector output, opened fullscreen in a browser on
     the server machine: CDG rendering during songs; between songs an
     intermission board (NOW singing / up NEXT / full rotation queue) plus a

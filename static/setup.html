@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KriticalDJ Setup</title>
+<style>
+:root{--bg:#14161a;--panel:#1e2128;--text:#e8eaed;--dim:#9aa0a6;--accent:#4fc3f7;--ok:#7bd88f;--warn:#e57373;--line:#22252c}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,Arial,sans-serif;max-width:720px;margin:0 auto;padding:0 16px}
+header{padding:16px 0;display:flex;align-items:baseline}
+h1{font-size:19px;margin:0}
+h1 small{color:var(--dim);font-weight:normal;margin-left:8px}
+header a{margin-left:auto;font-size:14px;color:var(--accent);text-decoration:none}
+section{background:var(--panel);border-radius:12px;padding:14px 16px;margin-bottom:14px}
+section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;margin:0 0 10px}
+p{font-size:14px;color:var(--dim);margin:6px 0}
+p b{color:var(--text)}
+button{font-size:15px;padding:11px 16px;border-radius:9px;border:1px solid #3a3f47;background:var(--bg);color:var(--text);cursor:pointer}
+#reset.arm{background:var(--warn);color:#2a0505;font-weight:700;border-color:var(--warn)}
+table{width:100%;border-collapse:collapse;font-size:14px}
+td{padding:5px 0;border-bottom:1px solid var(--line)}
+td:first-child{color:var(--dim);width:46%}
+#msg{color:var(--ok);font-size:14px;min-height:18px;margin-top:8px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Setup <small id="party"></small></h1>
+  <a href="/kj">&larr; back to KJ Console</a>
+</header>
+
+<section>
+  <h2>Library</h2>
+  <p><b id="count">&hellip;</b> songs indexed</p>
+  <button id="rescan">&#8635; Rescan library</button>
+  <p>Run after adding files or refreshing the library export (picks up a new
+  <code>index.json</code> too). Safe during a party &mdash; queued songs keep playing.</p>
+</section>
+
+<section>
+  <h2>Session</h2>
+  <button id="reset">Reset session</button>
+  <p>Clears the queue, the singer rotation, and anything on stage &mdash; a fresh
+  start for the next party. Two clicks required.</p>
+</section>
+
+<section>
+  <h2>Configuration <span style="text-transform:none;letter-spacing:0">(edit <code>config.json</code> and restart to change)</span></h2>
+  <table id="cfg"></table>
+</section>
+<div id="msg"></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let resetArmed = null;
+
+function refresh(){
+  fetch("/api/config").then(r=>r.json()).then(c=>{
+    $("party").textContent = c.party_name;
+    const rows = [
+      ["Party name", c.party_name],
+      ["Singer URL (QR)", c.public_url],
+      ["Intermission between songs", c.intermission_seconds + " s"],
+      ["Start-now countdown", c.start_now_countdown_seconds + " s"],
+      ["Lyrics sync offset", c.lyrics_offset_ms + " ms (live-adjustable on the KJ console)"],
+    ];
+    const t = $("cfg"); t.textContent = "";
+    for(const [k,v] of rows){
+      const tr = document.createElement("tr");
+      const a = document.createElement("td"); a.textContent = k;
+      const b = document.createElement("td"); b.textContent = v;
+      tr.appendChild(a); tr.appendChild(b); t.appendChild(tr);
+    }
+  });
+  fetch("/api/songs?limit=1").then(r=>r.json()).then(d=>{
+    $("count").textContent = d.total.toLocaleString();
+  });
+}
+
+$("rescan").onclick = () => {
+  $("rescan").textContent = "Scanning…";
+  fetch("/api/kj/rescan", {method:"POST"}).then(r=>r.json()).then(d=>{
+    $("rescan").innerHTML = "&#8635; Rescan library";
+    $("msg").textContent = "Rescanned: " + d.count.toLocaleString() + " songs.";
+    refresh();
+  });
+};
+
+$("reset").onclick = () => {
+  const b = $("reset");
+  if(!resetArmed){
+    b.classList.add("arm"); b.textContent = "Really reset? (clears queue + singers)";
+    resetArmed = setTimeout(()=>{ b.classList.remove("arm"); b.textContent = "Reset session"; resetArmed = null; }, 4000);
+    return;
+  }
+  clearTimeout(resetArmed); resetArmed = null;
+  b.classList.remove("arm"); b.textContent = "Reset session";
+  fetch("/api/kj/reset", {method:"POST"}).then(()=>{ $("msg").textContent = "Session reset."; });
+};
+
+refresh();
+</script>
+</body>
+</html>

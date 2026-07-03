@@ -9,9 +9,13 @@
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,Arial,sans-serif}
 header{position:sticky;top:0;background:var(--panel);padding:10px 16px;z-index:2;box-shadow:0 2px 8px rgba(0,0,0,.5)}
-h1{font-size:17px;margin:0 0 2px}
+h1{font-size:17px;margin:0 0 2px;display:flex;align-items:baseline}
 h1 small{color:var(--dim);font-weight:normal;margin-left:8px}
+h1 a{margin-left:auto;font-size:13px;color:var(--dim);text-decoration:none}
+h1 a:hover{color:var(--accent)}
 #status{font-size:14px;color:var(--dim);min-height:18px}
+#qsum{font-size:14px;color:var(--dim);margin-top:2px}
+#qsum b{color:var(--text)}
 #status b{color:var(--accent)}
 #status .cd{color:var(--ok);font-weight:700;font-variant-numeric:tabular-nums}
 .bar{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
@@ -27,22 +31,21 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 .row .n{color:var(--dim);min-width:22px;text-align:right}
 .row .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .row .t b{color:var(--accent)}
+.row .t .art{color:var(--dim)}
 .row button{font-size:14px;padding:4px 10px;border-radius:7px;border:1px solid #3a3f47;background:var(--bg);color:var(--dim);cursor:pointer}
 .row button.x{color:var(--warn)}
 .chips{display:flex;gap:6px;flex-wrap:wrap;padding:8px 16px}
 .chip{display:flex;align-items:center;gap:4px;background:var(--panel);border:1px solid #3a3f47;border-radius:999px;padding:5px 6px 5px 13px;font-size:14px}
 .chip button{border:none;background:none;color:var(--dim);cursor:pointer;font-size:13px;padding:2px 5px}
 .chip button.x{color:var(--warn)}
-#danger{display:flex;gap:10px;padding:16px;border-top:1px solid var(--line);margin-top:14px}
-#danger button{font-size:14px;padding:10px 14px;border-radius:8px;border:1px solid #3a3f47;background:var(--bg);color:var(--dim);cursor:pointer}
-#reset.arm{background:var(--warn);color:#2a0505;font-weight:700;border-color:var(--warn)}
 .empty{color:var(--dim);font-size:14px;padding:8px 16px}
 </style>
 </head>
 <body>
 <header>
-  <h1>KJ Console <small id="party"></small></h1>
+  <h1>KJ Console <small id="party"></small><a href="/setup">&#9881; Setup</a></h1>
   <div id="status"></div>
+  <div id="qsum"></div>
   <div class="bar">
     <button onclick="api('play')">&#9654; Play</button>
     <button onclick="api('pause')">&#10074;&#10074; Pause</button>
@@ -62,17 +65,13 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 <section><h2>Rotation (play order)</h2><div id="up"></div></section>
 <section><h2>Singers (rotation order)</h2><div class="chips" id="singers"></div></section>
 <section><h2>Queue by singer</h2><div id="queue"></div></section>
-<div id="danger">
-  <button id="rescan" onclick="rescan()">&#8635; Rescan library</button>
-  <button id="reset" onclick="reset()">Reset session</button>
-</div>
 
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
-let STATE = null, clockOff = 0, resetArmed = null;
+let STATE = null, CFG = {intermission_seconds: 30}, clockOff = 0;
 
-fetch("/api/config").then(r=>r.json()).then(c=>{ $("party").textContent = c.party_name; });
+fetch("/api/config").then(r=>r.json()).then(c=>{ CFG = c; $("party").textContent = c.party_name; });
 
 function api(cmd){ fetch("/api/kj/"+cmd, {method:"POST"}); }
 function post(path, body){ fetch(path, {method:"POST", body:JSON.stringify(body)}); }
@@ -81,21 +80,10 @@ function entryMove(id,d){ post("/api/kj/entry_move", {entry_id:id, dir:d}); }
 function singerMove(n,d){ post("/api/kj/singer_move", {name:n, dir:d}); }
 function singerKick(n){ if(confirm("Remove "+n+" and their queued songs?")) post("/api/kj/singer_remove",{name:n}); }
 function delEntry(id){ fetch("/api/queue/"+id, {method:"DELETE"}); }
-function rescan(){
-  $("rescan").textContent = "Scanning…";
-  fetch("/api/kj/rescan",{method:"POST"}).then(r=>r.json())
-    .then(d=>{ $("rescan").textContent = "↻ Rescan library ("+d.count.toLocaleString()+" songs)"; });
-}
-function reset(){
-  const b = $("reset");
-  if(!resetArmed){
-    b.classList.add("arm"); b.textContent = "Really reset? (clears queue + singers)";
-    resetArmed = setTimeout(()=>{ b.classList.remove("arm"); b.textContent="Reset session"; resetArmed=null; }, 4000);
-    return;
-  }
-  clearTimeout(resetArmed); resetArmed = null;
-  b.classList.remove("arm"); b.textContent = "Reset session";
-  fetch("/api/kj/reset",{method:"POST"});
+
+function fmtWait(sec){
+  const m = Math.round(sec / 60);
+  return m < 60 ? "~" + m + " min" : "~" + Math.floor(m/60) + "h " + (m%60) + "m";
 }
 
 function mkbtn(txt, cls, fn){ const b=document.createElement("button"); b.textContent=txt;
@@ -121,14 +109,33 @@ function render(){
   }
   if(st.lyrics_offset_ms != null) $("off").textContent = st.lyrics_offset_ms+" ms";
 
-  // rotation preview
+  // queue length summary: count + rough wall-clock time (song durations where
+  // known, 4 min assumed otherwise, plus the intermission gap between songs)
+  const upl = st.upcoming || [];
+  if(upl.length){
+    const sec = upl.reduce((a,e)=>a+(e.duration||240), 0)
+              + (CFG.intermission_seconds||30) * upl.length;
+    $("qsum").textContent = "";
+    const b1 = document.createElement("b"); b1.textContent = upl.length + (upl.length===1?" song":" songs");
+    $("qsum").appendChild(b1);
+    $("qsum").appendChild(document.createTextNode(" in the queue · "));
+    const b2 = document.createElement("b"); b2.textContent = fmtWait(sec);
+    $("qsum").appendChild(b2);
+    $("qsum").appendChild(document.createTextNode(" until it runs dry"));
+  } else {
+    $("qsum").textContent = "Queue is empty";
+  }
+
+  // rotation preview: singer / title / artist, all readable at a glance
   const up = $("up"); up.textContent = "";
-  (st.upcoming||[]).forEach((e,i)=>{
+  upl.forEach((e,i)=>{
     const r = document.createElement("div"); r.className = "row";
     const n = document.createElement("div"); n.className = "n"; n.textContent = (i+1)+"."; r.appendChild(n);
     const t = document.createElement("div"); t.className = "t";
     const b = document.createElement("b"); b.textContent = e.singer; t.appendChild(b);
-    t.appendChild(document.createTextNode(" — "+e.title+" ("+e.artist+")")); r.appendChild(t);
+    t.appendChild(document.createTextNode(" — "+e.title));
+    const a = document.createElement("span"); a.className = "art"; a.textContent = " · "+e.artist;
+    t.appendChild(a); r.appendChild(t);
     r.appendChild(mkbtn("✕","x",()=>delEntry(e.id)));
     up.appendChild(r);
   });
