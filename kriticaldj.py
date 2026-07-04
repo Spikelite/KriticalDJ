@@ -32,7 +32,8 @@ DEFAULT_CONFIG = {
     "host": "0.0.0.0",
     "port": 8080,
     "party_name": "Karaoke Night",
-    "intermission_seconds": 30,
+    "intermission_seconds": 15,  # short grace: up-next is announced on screen
+                                 # during the song's last 15s already
     "start_now_countdown_seconds": 3,
     # Rendering leads Bluetooth audio by the sink's latency; this shifts CDG
     # frames relative to audio.currentTime. Calibrate from the KJ console.
@@ -56,6 +57,56 @@ def load_config(path: Path) -> dict:
         print(f"[{APP}] music_root is not set in {path}")
         sys.exit(1)
     return cfg
+
+
+# GUI-editable config fields (POST /api/setup/config): kind drives validation.
+_CONFIG_FIELDS = {
+    "party_name": "str", "public_url": "str", "music_root": "dir",
+    "host": "str", "port": "int", "intermission_seconds": "int",
+    "start_now_countdown_seconds": "int", "lyrics_offset_ms": "int",
+}
+_CONFIG_LIMITS = {"port": (1, 65535), "intermission_seconds": (3, 600),
+                  "start_now_countdown_seconds": (0, 30),
+                  "lyrics_offset_ms": (-2000, 2000)}
+_RESTART_KEYS = {"host", "port"}  # rebinding the socket can't happen live
+
+
+def validate_config_changes(cfg: dict, body: dict):
+    """Screen a GUI config edit against the whitelist above.
+
+    Returns (changes, errors, restart): sanitized values that actually differ
+    from cfg, human-readable rejections, and which accepted keys only take
+    effect after a server restart. Does NOT mutate cfg -- the caller applies."""
+    changes, errors, restart = {}, [], []
+    for key, val in body.items():
+        kind = _CONFIG_FIELDS.get(key)
+        if kind is None:
+            errors.append(f"unknown setting: {key}")
+            continue
+        if kind == "int":
+            try:
+                val = int(val)
+            except (TypeError, ValueError):
+                errors.append(f"{key} must be a number")
+                continue
+            lo, hi = _CONFIG_LIMITS[key]
+            val = max(lo, min(hi, val))
+        else:
+            if not isinstance(val, str):
+                errors.append(f"{key} must be text")
+                continue
+            val = val.strip()
+            if key == "party_name" and not val:
+                errors.append("party_name cannot be empty")
+                continue
+            if kind == "dir" and not Path(val).is_dir():
+                errors.append(f"{key}: not a folder: {val}")
+                continue
+        if val != cfg.get(key):
+            changes[key] = val
+            if key in _RESTART_KEYS:
+                restart.append(key)
+    return changes, errors, restart
 
 
 def lan_url(cfg: dict) -> str:
@@ -316,6 +367,10 @@ class State:
         self.deadline = 0.0              # epoch when intermission/countdown ends
         self.transport = {"cmd": "play", "seq": 0}
         self.next_entry_id = 1
+        # The locked "up next" slot: entry id, or None. Once someone is
+        # projected next they stay next -- people plan around it (see UAT).
+        # Passive queue adds can never displace it; KJ reorders reset it.
+        self.pinned: int | None = None
         self._load()
 
     # -- persistence -------------------------------------------------------
@@ -327,7 +382,7 @@ class State:
         except (ValueError, OSError):
             return
         for k in ("singers", "queue", "cursor", "now", "phase",
-                  "deadline", "transport", "next_entry_id"):
+                  "deadline", "transport", "next_entry_id", "pinned"):
             if k in d:
                 setattr(self, k, d[k])
         # A power failure mid-song resumes at the intermission board rather
@@ -342,7 +397,7 @@ class State:
     def _save(self) -> None:
         d = {k: getattr(self, k) for k in
              ("singers", "queue", "cursor", "now", "phase",
-              "deadline", "transport", "next_entry_id")}
+              "deadline", "transport", "next_entry_id", "pinned")}
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(d, indent=1), encoding="utf-8")
         os.replace(tmp, self.path)
@@ -357,18 +412,40 @@ class State:
                 pass
 
     def mutate(self, songs: dict, fn) -> None:
-        """Run fn() under the lock, then journal + broadcast."""
+        """Run fn() under the lock, then journal + broadcast. The up-next pin
+        is reconciled here so no mutation path can leave it dangling."""
         with self.lock:
             fn()
+            self._reconcile_pin()
             self._save()
             self._broadcast(songs)
 
+    def _reconcile_pin(self) -> None:
+        """Drop a pin whose entry left the queue; when unpinned, lock in
+        whoever is projected next RIGHT NOW (first projection wins -- later
+        queue adds must not displace an announced next singer)."""
+        if self.pinned is not None and \
+                not any(e["id"] == self.pinned for e in self.queue):
+            self.pinned = None
+        if self.pinned is None:
+            up = self.rotation_preview(1)
+            if up:
+                self.pinned = up[0]["id"]
+
     # -- views ---------------------------------------------------------------
     def rotation_preview(self, limit: int = 12) -> list:
-        """Upcoming (singer, entry) order, simulated without mutating."""
+        """Upcoming (singer, entry) order, simulated without mutating. A
+        pinned entry is always first; the simulation continues from the
+        rotation slot after its singer, so only the tail stays fluid."""
         entries = list(self.queue)
         cursor = self.cursor
         out = []
+        pin = next((e for e in entries if e["id"] == self.pinned), None)
+        if pin is not None:
+            entries.remove(pin)
+            out.append(pin)
+            if pin["singer"] in self.singers:
+                cursor = (self.singers.index(pin["singer"]) + 1) % len(self.singers)
         while len(out) < limit:
             e, cursor = pick_next(self.singers, cursor, entries)
             if e is None:
@@ -395,6 +472,7 @@ class State:
                 "queue": [song_view(e) for e in self.queue],
                 "singers": list(self.singers),
                 "transport": dict(self.transport),
+                "pinned": self.pinned,
             }
             out.update(self.extra)
             return out
@@ -419,11 +497,17 @@ class Flow:
         began = []
 
         def fn():
-            e, st.cursor = pick_next(st.singers, st.cursor, st.queue)
+            # honor the locked up-next slot; fall back to the plain rotation
+            e = next((x for x in st.queue if x["id"] == st.pinned), None)
+            if e is not None and e["singer"] in st.singers:
+                st.cursor = (st.singers.index(e["singer"]) + 1) % len(st.singers)
+            else:
+                e, st.cursor = pick_next(st.singers, st.cursor, st.queue)
             if e is None:
                 st.phase, st.now = "idle", None
                 return
             st.queue.remove(e)
+            st.pinned = None  # consumed; mutate() re-pins the new next
             st.now = e
             st.phase = "playing"
             st.transport = {"cmd": "play", "seq": st.transport["seq"] + 1}
@@ -464,6 +548,48 @@ class Flow:
 
     def skip(self) -> None:
         self.song_ended("skipped")
+
+    def restart_current(self) -> None:
+        """KJ 'start over': re-seek the current song to 0:00 without touching
+        the rotation or queue. The screen owns the audio clock, so this rides
+        the transport channel as a one-shot 'restart' applied on seq change."""
+        st = self.state
+
+        def fn():
+            if st.now is not None and st.phase == "playing":
+                st.transport = {"cmd": "restart", "seq": st.transport["seq"] + 1}
+        st.mutate(self.songs, fn)
+
+    def skip_to_singer_next(self) -> None:
+        """Skip the now-playing song but keep the SAME singer on stage,
+        promoting their next queued entry immediately (e.g. the current track is
+        broken). The rotation cursor is untouched, so the round-robin order is
+        unaffected. Falls back to a normal skip if that singer has nothing else
+        queued."""
+        st = self.state
+        skipped, started = [], []
+
+        def fn():
+            cur = st.now
+            if cur is None:
+                return
+            skipped.append(cur)
+            nxt = next((e for e in st.queue if e["singer"] == cur["singer"]), None)
+            if nxt is None:  # nothing else from this singer: behave like a plain skip
+                st.now = None
+                st.phase = "intermission"
+                st.deadline = time.time() + self.cfg["intermission_seconds"]
+                return
+            st.queue.remove(nxt)
+            st.now = nxt
+            st.phase = "playing"
+            st.transport = {"cmd": "play", "seq": st.transport["seq"] + 1}
+            started.append(nxt)
+        st.mutate(self.songs, fn)
+        if skipped and self.stats:
+            self.stats.log("skipped", skipped[0]["singer"], self._info(skipped[0]["song_id"]))
+        if started and self.stats:
+            self.stats.log("started", started[0]["singer"], self._info(started[0]["song_id"]))
 
     def tick_forever(self) -> None:
         """Background thread: advance phases whose deadline has passed, and
@@ -657,6 +783,10 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
             if u.path == "/api/config":
                 return self._json({"party_name": cfg["party_name"],
                                    "public_url": lan_url(cfg),
+                                   "public_url_cfg": cfg["public_url"],
+                                   "music_root": cfg["music_root"],
+                                   "host": cfg["host"],
+                                   "port": cfg["port"],
                                    "intermission_seconds": cfg["intermission_seconds"],
                                    "start_now_countdown_seconds": cfg["start_now_countdown_seconds"],
                                    "lyrics_offset_ms": cfg["lyrics_offset_ms"]})
@@ -745,12 +875,25 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
             if u.path == "/api/screen/ended":
                 flow.song_ended()
                 return self._json({"ok": True})
+            if u.path == "/api/kj/pin":
+                eid = int(body.get("entry_id", -1))
+                ok = []
+                def fn():
+                    # explicit KJ override: hand the locked up-next slot to
+                    # any queued entry (reconcile validates it stays sane)
+                    ok.append(any(e["id"] == eid for e in state.queue))
+                    if ok[0]:
+                        state.pinned = eid
+                state.mutate(songs, fn)
+                return self._json({"ok": ok[0]})
             if u.path == "/api/kj/entry_move":
                 moved = []
                 def fn():
                     moved.append(move_entry(state.queue,
                                             int(body.get("entry_id", -1)),
                                             int(body.get("dir", 0))))
+                    if moved[0]:  # KJ reorder overrides the up-next lock
+                        state.pinned = None
                 state.mutate(songs, fn)
                 return self._json({"ok": moved[0]})
             if u.path == "/api/kj/singer_move":
@@ -759,6 +902,8 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                     moved.append(move_singer(state.singers,
                                              (body.get("name") or "").strip(),
                                              int(body.get("dir", 0))))
+                    if moved[0]:  # KJ reorder overrides the up-next lock
+                        state.pinned = None
                 state.mutate(songs, fn)
                 return self._json({"ok": moved[0]})
             if u.path == "/api/kj/singer_remove":
@@ -781,6 +926,7 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                     state.singers = []
                     state.cursor = 0
                     state.now = None
+                    state.pinned = None
                     state.phase = "idle"
                     state.deadline = 0.0
                 state.mutate(songs, fn)
@@ -796,6 +942,40 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                                                         kv[1]["title"].lower()))
                 state.mutate(songs, fn)
                 return self._json({"ok": True, "count": len(songs)})
+            if u.path == "/api/setup/config":
+                changes, errors, restart = validate_config_changes(cfg, body)
+                count = None
+                if "music_root" in changes:
+                    # fs walk outside the lock, like /api/kj/rescan; a path
+                    # with nothing indexed must not strand the party
+                    fresh = scan_library(changes["music_root"])
+                    if fresh:
+                        count = len(fresh)
+                    else:
+                        errors.append("no songs found under that music_root"
+                                      " -- keeping the current library")
+                        changes.pop("music_root")
+
+                def fn():
+                    cfg.update(changes)
+                    if "lyrics_offset_ms" in changes:
+                        state.extra["lyrics_offset_ms"] = cfg["lyrics_offset_ms"]
+                    if count is not None:
+                        songs.clear()
+                        songs.update(fresh)
+                        ordered[:] = sorted(songs.items(),
+                                            key=lambda kv: (kv[1]["artist"].lower(),
+                                                            kv[1]["title"].lower()))
+                state.mutate(songs, fn)
+                if changes:
+                    try:
+                        cfg_path.write_text(json.dumps(cfg, indent=2),
+                                            encoding="utf-8")
+                    except OSError:
+                        errors.append("could not write config.json")
+                return self._json({"ok": not errors, "applied": sorted(changes),
+                                   "errors": errors, "restart_needed": restart,
+                                   "count": count})
             if u.path == "/api/kj/offset":
                 delta = int(body.get("delta", 0))
                 def fn():
@@ -814,6 +994,10 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                     flow.transport_cmd(cmd)
                 elif cmd == "skip":
                     flow.skip()
+                elif cmd == "restart":
+                    flow.restart_current()
+                elif cmd == "skip_singer":
+                    flow.skip_to_singer_next()
                 elif cmd == "start_now":
                     flow.start_now()
                 else:

@@ -21,6 +21,15 @@ body[data-view="count"] #count{display:flex}
  background:linear-gradient(rgba(0,0,0,.65),transparent);display:flex;gap:12px;opacity:.9}
 #playhdr b{color:var(--accent)}
 #playhdr .nxt{margin-left:auto;color:var(--dim);font-size:18px;align-self:center}
+#ptimer{color:var(--dim);font-size:18px;align-self:center;margin-left:14px;
+ font-variant-numeric:tabular-nums}
+/* up-next call-out: fades in over the song's last seconds so the next
+   singer starts moving before the track even ends */
+#upnext{position:absolute;left:0;right:0;bottom:0;padding:2.2vh 3vw;font-size:4.2vh;
+ background:linear-gradient(transparent,rgba(0,0,0,.8));text-align:center;
+ opacity:0;transition:opacity .6s;pointer-events:none}
+#upnext.show{opacity:1}
+#upnext b{color:var(--ok)}
 
 /* ---- intermission / idle board ----
    Top 2/5: grab-the-mic banner. Bottom 3/5: rotation left, QR packed right. */
@@ -59,6 +68,7 @@ body[data-view="count"] #count{display:flex}
 <div class="view" id="play">
   <canvas id="cdg" width="300" height="216"></canvas>
   <div id="playhdr"></div>
+  <div id="upnext"></div>
 </div>
 <div class="view" id="board">
   <div class="top">
@@ -132,6 +142,9 @@ async function loadSong(entry) {
   nxt.className = "nxt";
   nxt.id = "hdrnext";
   $("playhdr").appendChild(nxt);
+  const tm = document.createElement("span");
+  tm.id = "ptimer";
+  $("playhdr").appendChild(tm);
   audio.src = "/media/" + entry.song_id + "/mp3";
   try {
     const r = await fetch("/media/" + entry.song_id + "/cdg");
@@ -161,7 +174,9 @@ audio.addEventListener("ended", () => {
   fetch("/api/screen/ended", {method: "POST"});
 });
 
-// ---- countdown ticking ------------------------------------------------------
+// ---- countdown + play-view ticking ------------------------------------------
+const fmtTime = s => Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
+
 setInterval(() => {
   if (!STATE) return;
   const remain = Math.max(0, STATE.deadline - (Date.now() / 1000 + clockOff));
@@ -169,7 +184,16 @@ setInterval(() => {
     $("timer").textContent = STATE.upcoming.length ? Math.ceil(remain) : "";
   } else if (STATE.phase === "countdown") {
     $("bignum").textContent = Math.max(1, Math.ceil(remain));
+  } else if (STATE.phase === "playing") {
+    // corner elapsed/total timer, and the up-next call-out over the last 15 s
+    const tm = $("ptimer"), d = audio.duration;
+    if (tm) tm.textContent = isFinite(d) && d > 0
+      ? fmtTime(audio.currentTime) + " / " + fmtTime(d) : "";
+    $("upnext").classList.toggle("show",
+      !!(STATE.next && isFinite(d) && d > 0 && d - audio.currentTime <= 15));
+    return;
   }
+  $("upnext").classList.remove("show");
 }, 200);
 
 // ---- state application ------------------------------------------------------
@@ -182,6 +206,16 @@ function apply() {
     if (!curEntry || curEntry.id !== st.now.id) loadSong(st.now);
     const nxt = $("hdrnext");
     if (nxt) nxt.textContent = st.next ? ("next: " + st.next.singer) : "";
+    // up-next call-out content (ticker fades it in over the last 15 s)
+    const un = $("upnext");
+    un.textContent = "";
+    if (st.next) {
+      un.appendChild(document.createTextNode("🎤 Up next: "));
+      const b = document.createElement("b");
+      b.textContent = st.next.singer;
+      un.appendChild(b);
+      un.appendChild(document.createTextNode(" — " + st.next.title));
+    }
   } else {
     if (!audio.paused) audio.pause();
     if (st.phase !== "countdown") curEntry = null;
@@ -194,6 +228,7 @@ function apply() {
     lastSeq = st.transport.seq;
     if (isNew && st.phase === "playing") {
       if (st.transport.cmd === "pause") audio.pause();
+      else if (st.transport.cmd === "restart") { audio.currentTime = 0; tryPlay(); }
       else tryPlay();
     }
   }

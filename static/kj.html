@@ -49,7 +49,9 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
   <div class="bar">
     <button onclick="api('play')">&#9654; Play</button>
     <button onclick="api('pause')">&#10074;&#10074; Pause</button>
-    <button onclick="api('skip')">&#9197; Skip</button>
+    <button onclick="api('restart')" title="Restart the current song from the beginning">&#8635; Start over</button>
+    <button onclick="api('skip')" title="Skip to the next singer in the rotation">&#9197; Skip</button>
+    <button onclick="api('skip_singer')" title="Skip this song and play the SAME singer's next queued song">&#9193; Singer's next</button>
     <button class="go" onclick="api('start_now')">&#128640; Start now</button>
   </div>
   <div class="sync">Lyrics sync
@@ -79,6 +81,7 @@ function offset(d){ post("/api/kj/offset", {delta:d}); }
 function entryMove(id,d){ post("/api/kj/entry_move", {entry_id:id, dir:d}); }
 function singerMove(n,d){ post("/api/kj/singer_move", {name:n, dir:d}); }
 function singerKick(n){ if(confirm("Remove "+n+" and their queued songs?")) post("/api/kj/singer_remove",{name:n}); }
+function pinEntry(id){ post("/api/kj/pin", {entry_id:id}); }
 function delEntry(id){ fetch("/api/queue/"+id, {method:"DELETE"}); }
 
 function fmtWait(sec){
@@ -133,9 +136,15 @@ function render(){
     const n = document.createElement("div"); n.className = "n"; n.textContent = (i+1)+"."; r.appendChild(n);
     const t = document.createElement("div"); t.className = "t";
     const b = document.createElement("b"); b.textContent = e.singer; t.appendChild(b);
+    if(e.id===st.pinned){ const lk=document.createElement("span"); lk.textContent=" 🔒";
+      lk.title="Locked in as up next — new queue adds can't bump this slot"; t.appendChild(lk); }
     t.appendChild(document.createTextNode(" — "+e.title));
     const a = document.createElement("span"); a.className = "art"; a.textContent = " · "+e.artist;
     t.appendChild(a); r.appendChild(t);
+    if(e.id!==st.pinned){
+      const p=mkbtn("Next","",()=>pinEntry(e.id));
+      p.title="Lock this in as the up-next slot"; r.appendChild(p);
+    }
     r.appendChild(mkbtn("✕","x",()=>delEntry(e.id)));
     up.appendChild(r);
   });

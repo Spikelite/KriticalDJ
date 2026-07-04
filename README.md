@@ -56,14 +56,15 @@ top singers); the raw log is plain JSON-lines for any deeper analysis.
 
 ## Config
 
-`config.json` (created on first run):
+`config.json` (created on first run) — all of it editable live from the
+`/setup` page too; only `host`/`port` need a service restart to take effect:
 
 | key | default | meaning |
 |---|---|---|
 | `music_root` | *(required)* | folder tree of karaoke files |
 | `host` / `port` | `0.0.0.0` / `8080` | bind address |
 | `party_name` | `Karaoke Night` | shown on all surfaces |
-| `intermission_seconds` | `30` | pause between songs |
+| `intermission_seconds` | `15` | pause between songs (up-next is also shown on screen during a song's last 15 s) |
 | `start_now_countdown_seconds` | `3` | countdown after the KJ hits Start now |
 | `lyrics_offset_ms` | `0` | shift lyrics to match Bluetooth speaker latency (KJ-adjustable) |
 | `public_url` | *(auto-detected)* | URL encoded in the on-screen QR code |

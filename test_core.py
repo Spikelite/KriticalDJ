@@ -5,7 +5,8 @@ import zipfile
 from pathlib import Path
 
 from kriticaldj import (Flow, SingerRegistry, State, Stats, move_entry,
-                        move_singer, parse_title, pick_next, scan_library)
+                        move_singer, parse_title, pick_next, scan_library,
+                        validate_config_changes)
 
 E = lambda i, s: {"id": i, "singer": s, "song_id": "x"}
 
@@ -174,6 +175,157 @@ def test_stats_events_and_skip_vs_complete():
             ["queued", "started", "skipped", "started", "completed"]
         assert all(r["singer_id"] == rows[0]["singer_id"] for r in rows)
         assert rows[2]["title"] == "T" and rows[2]["artist"] == "A"
+
+
+def test_restart_current_bumps_transport_only():
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(td / "state.json")
+        flow = Flow(st, songs, {"intermission_seconds": 1})
+        st.mutate(songs, lambda: (st.singers.append("Ann"),
+                                  st.queue.append(E(1, "Ann"))))
+        flow._begin_next()
+        now_id, seq = st.now["id"], st.transport["seq"]
+        flow.restart_current()
+        # same song stays on stage; screen gets a one-shot 'restart' via new seq
+        assert st.now["id"] == now_id and st.phase == "playing"
+        assert st.transport == {"cmd": "restart", "seq": seq + 1}
+        # no-op when nothing is playing
+        flow.song_ended()
+        seq2 = st.transport["seq"]
+        flow.restart_current()
+        assert st.transport["seq"] == seq2
+
+
+def test_skip_to_singer_next_keeps_singer_and_rotation():
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        reg = SingerRegistry(td / "singers.json")
+        stats = Stats(td / "stats.jsonl", reg)
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(td / "state.json")
+        flow = Flow(st, songs, {"intermission_seconds": 1}, stats)
+        # Ann has two songs, Bob one; cursor starts at Ann
+        st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob"]),
+                                  st.queue.extend([E(1, "Ann"), E(2, "Bob"),
+                                                   E(3, "Ann")])))
+        flow._begin_next()                 # Ann's #1 on stage, cursor now at Bob
+        assert st.now["id"] == 1 and st.cursor == 1
+        flow.skip_to_singer_next()         # broken track -> Ann's next (#3) now
+        assert st.now["singer"] == "Ann" and st.now["id"] == 3
+        assert st.phase == "playing"
+        assert st.cursor == 1              # rotation untouched: Bob is still next
+        assert st.transport["cmd"] == "play"
+        # Ann's #3 finishes normally; rotation resumes at Bob
+        flow.song_ended()
+        flow._begin_next()
+        assert st.now["singer"] == "Bob" and st.now["id"] == 2
+        # stats: started(1), skipped(1), started(3), completed(3), started(2)
+        rows = [json.loads(l) for l in (td / "stats.jsonl").read_text().splitlines()]
+        assert [r["event"] for r in rows] == \
+            ["started", "skipped", "started", "completed", "started"]
+
+
+def test_skip_to_singer_next_falls_back_when_alone():
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(td / "state.json")
+        flow = Flow(st, songs, {"intermission_seconds": 5})
+        st.mutate(songs, lambda: (st.singers.append("Ann"),
+                                  st.queue.append(E(1, "Ann"))))
+        flow._begin_next()                 # Ann's only song on stage
+        flow.skip_to_singer_next()         # nothing else queued -> plain skip
+        assert st.now is None and st.phase == "intermission"
+
+
+def test_pin_locks_next_against_late_adds():
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(td / "state.json")
+        flow = Flow(st, songs, {"intermission_seconds": 1})
+        # Ann, Bob, Cal in rotation; only Cal has a song queued
+        st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob", "Cal"]),
+                                  st.queue.append(E(1, "Cal"))))
+        flow._begin_next()                 # Cal on stage; cursor wraps to Ann
+        assert st.now["singer"] == "Cal" and st.pinned is None
+        st.mutate(songs, lambda: st.queue.append(E(2, "Bob")))
+        assert st.pinned == 2              # Bob announced as next -> locked
+        assert st.snapshot(songs)["next"]["singer"] == "Bob"
+        # Ann queues; without the pin she'd cut ahead (cursor points at her)
+        st.mutate(songs, lambda: st.queue.append(E(3, "Ann")))
+        snap = st.snapshot(songs)
+        assert snap["next"]["singer"] == "Bob"     # slot held
+        assert [e["singer"] for e in snap["upcoming"]] == ["Bob", "Ann"]
+        # handoff honors the lock, then locks the new next (Ann)
+        flow.song_ended()
+        flow._begin_next()
+        assert st.now["singer"] == "Bob" and st.pinned == 3
+        # pin survives a restart (journaled)
+        st2 = State(td / "state.json")
+        assert st2.pinned == 3
+
+
+def test_pin_recomputes_when_pinned_entry_removed():
+    with tempfile.TemporaryDirectory() as td:
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(Path(td) / "state.json")
+        st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob"]),
+                                  st.queue.extend([E(1, "Ann"), E(2, "Bob")])))
+        assert st.pinned == 1              # Ann projected first -> locked
+        # Ann pulls her song (or KJ deletes it): lock moves to the natural next
+        st.mutate(songs, lambda: st.queue.remove(st.queue[0]))
+        assert st.pinned == 2
+        assert st.snapshot(songs)["next"]["singer"] == "Bob"
+
+
+def test_pin_untouched_by_skip_to_singer_next():
+    with tempfile.TemporaryDirectory() as td:
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(Path(td) / "state.json")
+        flow = Flow(st, songs, {"intermission_seconds": 1})
+        st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob"]),
+                                  st.queue.extend([E(1, "Ann"), E(2, "Bob"),
+                                                   E(3, "Ann")])))
+        flow._begin_next()                 # Ann's #1 on stage; Bob pinned next
+        assert st.pinned == 2
+        flow.skip_to_singer_next()         # Ann swaps to her #3; Bob stays next
+        assert st.now["id"] == 3 and st.pinned == 2
+
+
+def test_validate_config_changes():
+    cfg = {"party_name": "Karaoke Night", "intermission_seconds": 15,
+           "port": 8080, "host": "0.0.0.0", "public_url": "",
+           "lyrics_offset_ms": 0}
+    # ints parse from strings (HTML inputs) and clamp to sane ranges
+    ch, err, rst = validate_config_changes(cfg, {"intermission_seconds": "45"})
+    assert ch == {"intermission_seconds": 45} and not err and not rst
+    ch, _, _ = validate_config_changes(cfg, {"intermission_seconds": 99999})
+    assert ch["intermission_seconds"] == 600
+    ch, _, _ = validate_config_changes(cfg, {"lyrics_offset_ms": -9000})
+    assert ch["lyrics_offset_ms"] == -2000
+    # values equal to the current config are not "changes"
+    ch, err, _ = validate_config_changes(cfg, {"party_name": " Karaoke Night "})
+    assert ch == {} and not err
+    # rejections: unknown key, non-numeric int, empty party name, bogus folder
+    _, err, _ = validate_config_changes(cfg, {"hax": 1})
+    assert err and "unknown" in err[0]
+    _, err, _ = validate_config_changes(cfg, {"port": "abc"})
+    assert err and "port" in err[0]
+    _, err, _ = validate_config_changes(cfg, {"party_name": "  "})
+    assert err
+    _, err, _ = validate_config_changes(cfg, {"music_root": "Z:/no/such/dir"})
+    assert err and "music_root" in err[0]
+    # a real folder passes; host/port flag a restart
+    with tempfile.TemporaryDirectory() as td:
+        ch, err, rst = validate_config_changes(
+            cfg, {"music_root": td, "port": 9000, "host": "127.0.0.1"})
+        assert not err and ch["music_root"] == td
+        assert sorted(rst) == ["host", "port"]
+    # cfg itself is never touched by validation
+    assert cfg["port"] == 8080 and cfg["intermission_seconds"] == 15
 
 
 if __name__ == "__main__":

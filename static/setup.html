@@ -21,7 +21,11 @@ button{font-size:15px;padding:11px 16px;border-radius:9px;border:1px solid #3a3f
 table{width:100%;border-collapse:collapse;font-size:14px}
 td{padding:5px 0;border-bottom:1px solid var(--line)}
 td:first-child{color:var(--dim);width:46%}
-#msg{color:var(--ok);font-size:14px;min-height:18px;margin-top:8px}
+#msg{color:var(--ok);font-size:14px;min-height:18px;margin-top:8px;padding-bottom:16px}
+#msg.bad{color:var(--warn)}
+#cfg input{width:100%;font-size:14px;padding:6px 9px;border-radius:7px;border:1px solid #3a3f47;background:var(--bg);color:var(--text)}
+#cfg input:focus{outline:2px solid var(--accent)}
+#cfg .hint{font-size:12px;color:var(--dim);margin-top:2px}
 </style>
 </head>
 <body>
@@ -52,8 +56,11 @@ td:first-child{color:var(--dim);width:46%}
 </section>
 
 <section>
-  <h2>Configuration <span style="text-transform:none;letter-spacing:0">(edit <code>config.json</code> and restart to change)</span></h2>
+  <h2>Configuration</h2>
   <table id="cfg"></table>
+  <button id="save" style="margin-top:10px">&#128190; Save changes</button>
+  <p>Changes apply immediately (a new music folder is rescanned on save).
+  Only the bind address and port need a service restart.</p>
 </section>
 <div id="msg"></div>
 
@@ -62,21 +69,31 @@ td:first-child{color:var(--dim);width:46%}
 const $ = id => document.getElementById(id);
 let resetArmed = null;
 
+// editable config: key, label, input type, hint
+const CFGF = [
+  ["party_name", "Party name", "text", ""],
+  ["music_root", "Music folder (path on the server)", "text", "changing this rescans the library"],
+  ["public_url", "Singer URL for the QR code", "text", "blank = auto-detect the LAN address"],
+  ["intermission_seconds", "Intermission between songs (s)", "number", ""],
+  ["start_now_countdown_seconds", "Start-now countdown (s)", "number", ""],
+  ["lyrics_offset_ms", "Lyrics sync offset (ms)", "number", "also live-nudgeable on the KJ console"],
+  ["host", "Bind address", "text", "needs a service restart"],
+  ["port", "Port", "number", "needs a service restart"],
+];
+
 function refresh(){
   fetch("/api/config").then(r=>r.json()).then(c=>{
     $("party").textContent = c.party_name;
-    const rows = [
-      ["Party name", c.party_name],
-      ["Singer URL (QR)", c.public_url],
-      ["Intermission between songs", c.intermission_seconds + " s"],
-      ["Start-now countdown", c.start_now_countdown_seconds + " s"],
-      ["Lyrics sync offset", c.lyrics_offset_ms + " ms (live-adjustable on the KJ console)"],
-    ];
+    c.public_url = c.public_url_cfg;  // edit the raw value, not the auto-detected one
     const t = $("cfg"); t.textContent = "";
-    for(const [k,v] of rows){
+    for(const [key,label,type,hint] of CFGF){
       const tr = document.createElement("tr");
-      const a = document.createElement("td"); a.textContent = k;
-      const b = document.createElement("td"); b.textContent = v;
+      const a = document.createElement("td"); a.textContent = label;
+      if(hint){ const h=document.createElement("div"); h.className="hint"; h.textContent=hint; a.appendChild(h); }
+      const b = document.createElement("td");
+      const inp = document.createElement("input");
+      inp.type = type; inp.id = "cfg_"+key; inp.value = c[key];
+      b.appendChild(inp);
       tr.appendChild(a); tr.appendChild(b); t.appendChild(tr);
     }
   });
@@ -104,9 +121,31 @@ $("rescan").onclick = () => {
   $("rescan").textContent = "Scanning…";
   fetch("/api/kj/rescan", {method:"POST"}).then(r=>r.json()).then(d=>{
     $("rescan").innerHTML = "&#8635; Rescan library";
+    $("msg").classList.remove("bad");
     $("msg").textContent = "Rescanned: " + d.count.toLocaleString() + " songs.";
     refresh();
   });
+};
+
+$("save").onclick = () => {
+  const body = {};
+  for(const [key] of CFGF){ const inp=$("cfg_"+key); if(inp) body[key]=inp.value; }
+  $("save").textContent = "Saving…";
+  fetch("/api/setup/config", {method:"POST", body:JSON.stringify(body)})
+    .then(r=>r.json()).then(d=>{
+      $("save").innerHTML = "&#128190; Save changes";
+      const bits = [];
+      if(d.applied.length) bits.push("Saved: " + d.applied.join(", ") + ".");
+      else if(!d.errors.length) bits.push("No changes.");
+      if(d.count != null) bits.push("Library rescanned: " + d.count.toLocaleString() + " songs.");
+      if(d.restart_needed.length) bits.push("Restart the service for: " + d.restart_needed.join(", ") + ".");
+      if(d.errors.length) bits.push(d.errors.join(" · "));
+      $("msg").classList.toggle("bad", !d.ok);
+      $("msg").textContent = bits.join(" ");
+      refresh();
+    })
+    .catch(()=>{ $("save").innerHTML = "&#128190; Save changes";
+      $("msg").classList.add("bad"); $("msg").textContent = "Save failed — server unreachable?"; });
 };
 
 $("reset").onclick = () => {
@@ -118,7 +157,7 @@ $("reset").onclick = () => {
   }
   clearTimeout(resetArmed); resetArmed = null;
   b.classList.remove("arm"); b.textContent = "Reset session";
-  fetch("/api/kj/reset", {method:"POST"}).then(()=>{ $("msg").textContent = "Session reset."; });
+  fetch("/api/kj/reset", {method:"POST"}).then(()=>{ $("msg").classList.remove("bad"); $("msg").textContent = "Session reset."; });
 };
 
 refresh();

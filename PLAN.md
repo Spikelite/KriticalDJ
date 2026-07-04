@@ -77,7 +77,7 @@ folder scan otherwise. Small task on each side (song-sorter: extend
 | `music_root` | `""` (required) | folder tree of karaoke files |
 | `host` / `port` | `0.0.0.0` / `8080` | bind address |
 | `party_name` | `Karaoke Night` | shown on screens |
-| `intermission_seconds` | `30` | pause between songs |
+| `intermission_seconds` | `15` | pause between songs |
 | `start_now_countdown_seconds` | `3` | KJ "start now" countdown |
 | `public_url` | `""` (auto) | URL encoded in the QR code |
 
@@ -89,9 +89,13 @@ folder scan otherwise. Small task on each side (song-sorter: extend
 - `POST /api/queue {"song_id","singer"}` — queue a song (auto-registers singer)
 - `DELETE /api/queue/<entry_id>` — remove an entry
 - `POST /api/kj/play|pause|skip|start_now` — transport (KJ)
+- `POST /api/kj/restart` — one-shot restart of the current song (via transport)
+- `POST /api/kj/skip_singer` — skip now-playing to the SAME singer's next song
+- `POST /api/kj/pin {"entry_id"}` — hand the locked up-next slot to any entry
 - `POST /api/kj/entry_move {"entry_id","dir"}` — reorder within a singer's FIFO
 - `POST /api/kj/singer_move {"name","dir"}` / `singer_remove {"name"}` — rotation order
 - `POST /api/kj/reset` — clear session; `POST /api/kj/rescan` — reindex library
+- `POST /api/setup/config {key: value, ...}` — validated live config edit
 - `POST /api/kj/offset {"delta"}` — nudge lyrics_offset_ms (persisted + live)
 - `POST /api/screen/ended` — screen reports song finished
 - `GET /media/<song_id>/mp3|cdg` — media with HTTP Range support
@@ -156,6 +160,59 @@ folder scan otherwise. Small task on each side (song-sorter: extend
         queue/kick/reset endpoints; singer names canonicalize through the
         registry everywhere; GET /api/stats/summary aggregates (events,
         sessions, top played/queued/singers) and /setup displays it.
+
+- [~] **Phase 7 — UAT-feedback pass** (started 2026-07-04, chunked for the
+      token budget; each chunk ends compilable + tested):
+      - [x] **C1 singer UI**: name picker is a dropdown (placeholder default so
+            nobody queues as someone else, remembered in localStorage, inline
+            "add a new name" form); custom search clear-✕ (iOS Safari never
+            shows the native one; suppressed native + own button on both).
+      - [x] **C2 KJ transport**: `restart` (start current song over, one-shot
+            via transport seq; screen seeks 0) + `skip_singer` (skip the
+            now-playing song but promote the SAME singer's next queued entry;
+            cursor untouched so rotation is unaffected; falls back to plain
+            skip when they have nothing else).
+      - [x] **C3 locked up-next**: `state.pinned` (journaled entry id) — first
+            projection locks the next slot; passive queue adds can never
+            displace it (rotation_preview fronts the pin, `_begin_next`
+            consumes + re-pins). KJ overrides: reorders clear the pin,
+            `/api/kj/pin` hands the slot to any entry ("Next" button per
+            rotation row, 🔒 on the locked one). Reconciled centrally in
+            `State.mutate` so no path leaves it dangling.
+      - [x] **C4 screen timing**: up-next call-out banner fades in over the
+            song's last 15 s (screen owns the audio clock, so it's computed
+            client-side from `duration - currentTime`; content set in apply(),
+            visibility toggled by the 200 ms ticker; hidden when nobody is
+            next); `intermission_seconds` default 30 -> 15 (existing
+            config.json values override -- update deployed configs by hand
+            until C5's GUI); corner elapsed/total timer in the play header.
+            Live-verified in a driven browser incl. a real mid-song
+            /api/kj/restart seek; pixel layout -> user's hardware pass.
+      - [x] **C5 config GUI**: /setup's config table is an editable form ->
+            `POST /api/setup/config` (whitelist + type/range validation in
+            module-level `validate_config_changes`, unit-tested). Applies
+            live + persists to config.json; a changed music_root rescans
+            automatically and is refused if the new tree has no songs;
+            host/port are saved but reported `restart_needed`. GET
+            /api/config now also returns music_root/host/port/raw
+            public_url.
+      - [x] **C6 Bluetooth**: DEPLOY.md gained a ranked "if the audio
+            stutters or drops out" checklist. Top suspects for the UAT
+            dropouts: Pi 4 WiFi/BT single shared antenna (fix: Ethernet +
+            disable-wifi overlay, or 5 GHz-only) and USB 3 ports/enclosures
+            radiating across 2.4 GHz (fix: library drive on the black USB 2
+            ports). Then: placement above the crowd, pin A2DP + disable
+            headset roles (WirePlumber conf), `vcgencmd get_throttled`
+            power check, Class 1 dongle escalation, and the wired-aux
+            endgame (USB DAC -> mixer aux, lyrics offset back to ~0).
+            Doc-only chunk; no app code.
+      - [ ] **C7 library data cleanup**: catalog tags (`SFGD-48-09`), bracket
+            tags (`[SF Karaoke]`), Coulton album mislabeled "Bz Homemade",
+            `Artist - Song - Artist` stems, Rocky Horror dupes — root causes
+            live mostly in song-sorter's index.json; decide per item.
+      - [ ] **C8 multi-version songs (big)**: keep every source version on
+            disk, expose one chosen version to the player; auto-pick best,
+            KJ can swap versions and the choice is remembered.
 
 ## Notes for future sessions
 
