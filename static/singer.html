@@ -15,12 +15,21 @@ h1{font-size:18px;margin:0 0 4px}
 #mypos{color:var(--ok);font-weight:600}
 .names{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;align-items:center}
 .names .lbl{font-size:12px;color:var(--dim);margin-right:2px}
-.names button{padding:7px 13px;border-radius:999px;border:1px solid #3a3f47;background:var(--bg);color:var(--dim);font-size:14px;cursor:pointer}
-.names button.me{background:var(--accent);color:#00222f;font-weight:700;border-color:var(--accent)}
-#addform{display:none;gap:6px}
+#nameSel{font-size:14px;padding:7px 10px;border-radius:8px;border:1px solid #3a3f47;background:var(--bg);color:var(--text);max-width:60vw}
+#nameSel.none{color:var(--dim)}
+#addform{display:none;gap:6px;align-items:center}
 #addform input{font-size:14px;padding:6px 10px;border-radius:8px;border:1px solid #333;background:var(--bg);color:var(--text);width:130px}
-#q{width:100%;font-size:20px;padding:10px 12px;border-radius:10px;border:1px solid #333;background:var(--bg);color:var(--text)}
+#addform button{padding:6px 12px;border-radius:8px;border:1px solid #3a3f47;background:var(--bg);color:var(--text);font-size:14px;cursor:pointer}
+.qwrap{position:relative}
+#q{width:100%;font-size:20px;padding:10px 40px 10px 12px;border-radius:10px;border:1px solid #333;background:var(--bg);color:var(--text)}
 #q:focus{outline:2px solid var(--accent)}
+/* iOS Safari never renders the native search clear button (Android does); hide
+   the native one everywhere and use our own so behavior matches on both. */
+#q::-webkit-search-cancel-button{-webkit-appearance:none;appearance:none}
+#qclear{position:absolute;right:7px;top:50%;transform:translateY(-50%);display:none;
+ border:none;background:#333;color:var(--text);width:28px;height:28px;border-radius:50%;
+ font-size:15px;line-height:28px;text-align:center;cursor:pointer;padding:0}
+#qclear.show{display:block}
 .filters{display:flex;gap:6px;margin-top:8px}
 .filters button{font-size:13px;padding:6px 14px;border-radius:999px;border:1px solid #3a3f47;background:var(--bg);color:var(--dim);cursor:pointer}
 .filters button.on{background:var(--accent);color:#00222f;border-color:var(--accent);font-weight:600}
@@ -45,8 +54,19 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 <header>
 <h1 id="party">Karaoke</h1>
 <div id="now"></div>
-<div class="names" id="names"><span class="lbl">I am:</span></div>
-<input id="q" type="search" placeholder="Search artist or song&hellip;" autocomplete="off">
+<div class="names" id="names">
+  <span class="lbl">I am:</span>
+  <select id="nameSel" class="none"></select>
+  <span id="addform">
+    <input id="newname" type="text" placeholder="Your name" maxlength="40" autocomplete="off">
+    <button id="addok" type="button">OK</button>
+    <button id="addcancel" type="button">Cancel</button>
+  </span>
+</div>
+<div class="qwrap">
+  <input id="q" type="search" placeholder="Search artist or song&hellip;" autocomplete="off">
+  <button id="qclear" type="button" aria-label="Clear search">&#10005;</button>
+</div>
 <div class="filters" id="filters"><button data-f="all" class="on">All</button><button data-f="artist">Artist</button><button data-f="title">Song title</button></div>
 <div class="alpha" id="alpha"></div>
 </header>
@@ -66,28 +86,44 @@ function esc(s){ return s; } // rendered via textContent only
 
 function setMe(name){ ME=name; localStorage.setItem("kdj_name",name); renderState(); }
 
+// Name is a dropdown so you can't fat-finger someone else's identity. It
+// remembers your pick (localStorage) and starts on the "choose" placeholder so
+// a fresh visitor is nobody until they deliberately select a name.
 function renderNames(){
-  const box=$("names");
-  while(box.children.length>1) box.removeChild(box.lastChild);
+  const sel=$("nameSel");
   const names=(STATE?STATE.singers:[]).slice();
   if(ME && !names.includes(ME)) names.push(ME);
-  for(const n of names){
-    const b=document.createElement("button"); b.textContent=n;
-    if(n===ME) b.classList.add("me");
-    b.onclick=()=>setMe(n); box.appendChild(b);
-  }
-  const plus=document.createElement("button"); plus.textContent="+ add name";
-  plus.onclick=()=>{ form.style.display="flex"; plus.style.display="none"; form.querySelector("input").focus(); };
-  box.appendChild(plus);
-  const form=document.createElement("span"); form.id="addform";
-  const inp=document.createElement("input"); inp.placeholder="Your name"; inp.maxLength=40;
-  const ok=document.createElement("button"); ok.textContent="OK";
-  ok.onclick=()=>{ const v=inp.value.trim(); if(!v) return;
-    fetch("/api/singers",{method:"POST",body:JSON.stringify({name:v})})
-      .then(()=>{ setMe(v); toast("Welcome, "+v+"!"); }); };
-  inp.onkeydown=e=>{ if(e.key==="Enter") ok.onclick(); };
-  form.appendChild(inp); form.appendChild(ok); box.appendChild(form);
+  sel.textContent="";
+  sel.appendChild(new Option("— choose your name —",""));
+  for(const n of names) sel.appendChild(new Option(n,n));
+  sel.appendChild(new Option("＋ Add a new name…","__add__"));
+  const signedIn = ME && names.includes(ME);
+  sel.value = signedIn ? ME : "";
+  sel.classList.toggle("none", !signedIn);
 }
+
+function showAddForm(){
+  $("addform").style.display="flex";
+  $("nameSel").style.display="none";
+  const inp=$("newname"); inp.value=""; inp.focus();
+}
+function hideAddForm(){
+  $("addform").style.display="none";
+  $("nameSel").style.display="";
+}
+function submitAddName(){
+  const v=$("newname").value.trim(); if(!v){ hideAddForm(); return; }
+  fetch("/api/singers",{method:"POST",body:JSON.stringify({name:v})})
+    .then(r=>r.json()).then(d=>{ hideAddForm(); setMe(d.name||v); toast("Welcome, "+(d.name||v)+"!"); });
+}
+$("nameSel").addEventListener("change",e=>{
+  const v=e.target.value;
+  if(v==="__add__"){ e.target.value=ME||""; showAddForm(); return; }
+  setMe(v);  // "" = signed out; queueing is blocked until a real name is chosen
+});
+$("addok").onclick=submitAddName;
+$("addcancel").onclick=hideAddForm;
+$("newname").onkeydown=e=>{ if(e.key==="Enter") submitAddName(); else if(e.key==="Escape") hideAddForm(); };
 
 function songRow(s, opts){
   const r=document.createElement("div"); r.className="row";
@@ -155,7 +191,9 @@ $("filters").addEventListener("click",e=>{
 
 // search
 let timer=null;
-$("q").addEventListener("input",()=>{ clearTimeout(timer); timer=setTimeout(search,180); });
+function syncClear(){ $("qclear").classList.toggle("show", $("q").value.length>0); }
+$("q").addEventListener("input",()=>{ syncClear(); clearTimeout(timer); timer=setTimeout(search,180); });
+$("qclear").onclick=()=>{ $("q").value=""; syncClear(); $("q").focus(); search(); };
 function search(){
   const q=$("q").value.trim();
   fetch("/api/songs?limit=60&q="+encodeURIComponent(q)
