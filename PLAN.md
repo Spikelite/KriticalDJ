@@ -92,6 +92,8 @@ folder scan otherwise. Small task on each side (song-sorter: extend
 - `POST /api/kj/restart` — one-shot restart of the current song (via transport)
 - `POST /api/kj/skip_singer` — skip now-playing to the SAME singer's next song
 - `POST /api/kj/pin {"entry_id"}` — hand the locked up-next slot to any entry
+- `GET /api/song_versions?song_id=` — a song's versions + active index
+- `POST /api/kj/version {"song_id","index"}` — pick/remember a song's version
 - `POST /api/kj/entry_move {"entry_id","dir"}` — reorder within a singer's FIFO
 - `POST /api/kj/singer_move {"name","dir"}` / `singer_remove {"name"}` — rotation order
 - `POST /api/kj/reset` — clear session; `POST /api/kj/rescan` — reindex library
@@ -206,13 +208,40 @@ folder scan otherwise. Small task on each side (song-sorter: extend
             power check, Class 1 dongle escalation, and the wired-aux
             endgame (USB DAC -> mixer aux, lyrics offset back to ~0).
             Doc-only chunk; no app code.
-      - [ ] **C7 library data cleanup**: catalog tags (`SFGD-48-09`), bracket
-            tags (`[SF Karaoke]`), Coulton album mislabeled "Bz Homemade",
-            `Artist - Song - Artist` stems, Rocky Horror dupes — root causes
-            live mostly in song-sorter's index.json; decide per item.
-      - [ ] **C8 multi-version songs (big)**: keep every source version on
-            disk, expose one chosen version to the player; auto-pick best,
-            KJ can swap versions and the choice is remembered.
+      - [~] **C7 library data cleanup** (lives in song-sorter, not KDJ —
+            KDJ reads index.json verbatim). Scanned the synced 164k-track
+            cache. Verdicts: (a) **Coulton album** — 32 tracks mislabeled
+            `Bz's Homemade`, songs already correct → alias added; (b) **Rocky
+            Horror** — `The Rocky Horror Show` ×7 unified to `...Picture
+            Show` ×31 → alias added. Both apply via the *Unify artists*
+            menu on prod (39 tracks) then re-export. (c) `[SF Karaoke]`/
+            `[DMG Karaoke]` brackets — 0 in current cache, already gone; a
+            stale index.json on the Pi just needs a re-export. (d)
+            `Artist-Song-Artist` — 0 in source data; likely a KDJ display
+            artifact, awaiting a concrete example. (e) **catalog-tag leaks**
+            — FIXED in song-sorter main.py: `_parse_artist_song` now handles
+            compact `CATALOG-TRACK-ARTIST-SONG` stems (no spaces, e.g.
+            `DIS61201-13-MARY POPPINS-...`) via `_COMPACT_CATALOG_RE`, and
+            `refresh_names` falls back to it for Unknown-artist tracks so a
+            repeat *Refresh* fixes the 107/113 already cached (6 malformed
+            stragglers left: MW-808/THK/LEG w/ catalog-internal dashes or no
+            song). Verified against all 113 real stems + regressions.
+      - [~] **C8 multi-version songs (big)** — KriticalDJ consumer side DONE
+            + tested + browser-verified: index.json entries may carry an
+            optional `versions: [{path,label,duration}]` alongside the best
+            copy; scan builds a per-song `versions` list (v0 = best, mirrors
+            the old primary keys so single-version libraries are byte-for-byte
+            unchanged). `VersionStore` (versions.json) remembers the KJ's
+            per-song choice across restarts/rescans (stable id hashes; 0 =
+            default, never stored; resets never touch it). `_media_path`
+            serves the active version with a per-version extraction cache
+            key. `GET /api/song_versions`, `POST /api/kj/version`; snapshot
+            song_view carries `nversions`; KJ console shows a `⧉ vN` picker
+            on rotation rows with >1 version. **REMAINING: song-sorter emit
+            side** — `tracks_to_keep` must copy the non-best copies too and
+            add `versions` to each index entry (it already has every copy via
+            `n.list_tracks()`; today it exports only `_best_track`). Until
+            then KDJ just sees one version (harmless).
 
 ## Notes for future sessions
 

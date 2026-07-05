@@ -4,9 +4,9 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from kriticaldj import (Flow, SingerRegistry, State, Stats, move_entry,
-                        move_singer, parse_title, pick_next, scan_library,
-                        validate_config_changes)
+from kriticaldj import (Flow, SingerRegistry, State, Stats, VersionStore,
+                        move_entry, move_singer, parse_title, pick_next,
+                        scan_library, validate_config_changes)
 
 E = lambda i, s: {"id": i, "singer": s, "song_id": "x"}
 
@@ -326,6 +326,50 @@ def test_validate_config_changes():
         assert sorted(rst) == ["host", "port"]
     # cfg itself is never touched by validation
     assert cfg["port"] == 8080 and cfg["intermission_seconds"] == 15
+
+
+def test_scan_versions_from_sidecar():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "best.mp3").write_bytes(b"m"); (root / "best.cdg").write_bytes(b"c")
+        (root / "alt.zip").write_bytes(b"z")
+        (root / "index.json").write_text(json.dumps({"songs": [
+            {"path": "best.mp3", "artist": "Queen", "title": "Bo Rhap",
+             "duration": 354, "versions": [
+                 {"path": "alt.zip", "label": "SC edit", "duration": 300},
+                 {"path": "gone.mp3", "label": "missing"},  # skipped, no file
+             ]},
+        ]}), encoding="utf-8")
+        songs = scan_library(str(root))
+        s = list(songs.values())[0]
+        # primary keys untouched (back-compat) + a two-entry versions list
+        assert s["mp3"].endswith("best.mp3") and s["duration"] == 354
+        assert [v["label"] for v in s["versions"]] == ["Best", "SC edit"]
+        assert "zip" in s["versions"][1] and s["versions"][1]["duration"] == 300
+
+
+def test_scan_single_version_backcompat():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        d = root / "q"; d.mkdir()
+        (d / "Queen - Bohemian Rhapsody.mp3").write_bytes(b"m")
+        (d / "Queen - Bohemian Rhapsody.cdg").write_bytes(b"c")
+        s = list(scan_library(str(root)).values())[0]
+        # folder-scan libraries get exactly one implicit version
+        assert len(s["versions"]) == 1 and s["mp3"].endswith(".mp3")
+
+
+def test_version_store_persist_and_default():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "versions.json"
+        vs = VersionStore(p)
+        assert vs.get("abc") == 0            # default when unset
+        vs.set("abc", 2)
+        assert vs.get("abc") == 2
+        vs.set("abc", 0)                     # 0 clears the entry (stays lean)
+        assert vs.get("abc") == 0 and "abc" not in vs.by_id
+        vs.set("xyz", 3)
+        assert VersionStore(p).get("xyz") == 3   # survives restart
 
 
 if __name__ == "__main__":
