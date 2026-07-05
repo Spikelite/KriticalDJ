@@ -32,6 +32,7 @@ td:first-child{color:var(--dim);width:46%}
 <header>
   <h1>Setup <small id="party"></small></h1>
   <a href="/kj">&larr; back to KJ Console</a>
+  <a href="#" onclick="logout();return false" style="margin-left:14px">&#128274; Lock</a>
 </header>
 
 <section>
@@ -68,6 +69,7 @@ td:first-child{color:var(--dim);width:46%}
 "use strict";
 const $ = id => document.getElementById(id);
 let resetArmed = null;
+function logout(){ fetch("/api/kj/logout",{method:"POST"}).then(()=>location.href="/kj"); }
 
 // editable config: key, label, input type, hint
 const CFGF = [
@@ -79,6 +81,7 @@ const CFGF = [
   ["lyrics_offset_ms", "Lyrics sync offset (ms)", "number", "also live-nudgeable on the KJ console"],
   ["host", "Bind address", "text", "needs a service restart"],
   ["port", "Port", "number", "needs a service restart"],
+  ["kj_pin", "KJ access PIN (4 digits)", "password", "unlocks /kj and /setup — blank keeps the current PIN"],
 ];
 
 function refresh(){
@@ -92,7 +95,9 @@ function refresh(){
       if(hint){ const h=document.createElement("div"); h.className="hint"; h.textContent=hint; a.appendChild(h); }
       const b = document.createElement("td");
       const inp = document.createElement("input");
-      inp.type = type; inp.id = "cfg_"+key; inp.value = c[key];
+      inp.type = type; inp.id = "cfg_"+key;
+      inp.value = c[key] != null ? c[key] : "";  // kj_pin is write-only (never returned)
+      if(key==="kj_pin") inp.placeholder = "••••";
       b.appendChild(inp);
       tr.appendChild(a); tr.appendChild(b); t.appendChild(tr);
     }

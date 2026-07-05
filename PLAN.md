@@ -237,11 +237,24 @@ folder scan otherwise. Small task on each side (song-sorter: extend
             serves the active version with a per-version extraction cache
             key. `GET /api/song_versions`, `POST /api/kj/version`; snapshot
             song_view carries `nversions`; KJ console shows a `⧉ vN` picker
-            on rotation rows with >1 version. **REMAINING: song-sorter emit
-            side** — `tracks_to_keep` must copy the non-best copies too and
-            add `versions` to each index entry (it already has every copy via
-            `n.list_tracks()`; today it exports only `_best_track`). Until
-            then KDJ just sees one version (harmless).
+            on rotation rows with >1 version. **song-sorter emit side DONE**:
+            `tracks_to_keep` ranks copies best-first (`_ranked_tracks`),
+            exports the top N (configurable `version_limit`, prompted +
+            remembered; 1 = old single-version behavior), and lists the
+            alternates under each index entry, labelled by the source
+            brand-folder. Round-trip verified: emit -> KriticalDJ
+            `scan_library` reads every version and media resolves. The feature
+            is now live end to end.
+
+- [x] **Basic KJ auth** (post-UAT ask): a 4-digit `kj_pin` (config default
+      `0000`, editable from /setup, write-only -- never returned by
+      /api/config) gates the operator surfaces. `/kj` + `/setup` serve
+      `static/kjlogin.html` until `POST /api/kj/login` mints an in-memory
+      session token (HttpOnly cookie, dropped on restart); all `/api/kj/*`
+      (except login/logout) and `/api/setup/config` require it. Singer/screen
+      surfaces + read-only GETs stay public. `POST /api/kj/logout` + a Lock
+      link on both operator pages. Validated: 23 unit tests + full curl auth
+      flow + browser lock/unlock/relock.
 
 ## Notes for future sessions
 

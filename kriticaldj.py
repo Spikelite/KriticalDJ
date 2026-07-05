@@ -39,6 +39,9 @@ DEFAULT_CONFIG = {
     # frames relative to audio.currentTime. Calibrate from the KJ console.
     "lyrics_offset_ms": 0,
     "public_url": "",
+    # 4-digit gate for the operator surfaces (/kj, /setup). Change it from the
+    # setup screen; default is deliberately obvious so first boot isn't locked.
+    "kj_pin": "0000",
 }
 
 
@@ -64,6 +67,7 @@ _CONFIG_FIELDS = {
     "party_name": "str", "public_url": "str", "music_root": "dir",
     "host": "str", "port": "int", "intermission_seconds": "int",
     "start_now_countdown_seconds": "int", "lyrics_offset_ms": "int",
+    "kj_pin": "pin",
 }
 _CONFIG_LIMITS = {"port": (1, 65535), "intermission_seconds": (3, 600),
                   "start_now_countdown_seconds": (0, 30),
@@ -91,6 +95,13 @@ def validate_config_changes(cfg: dict, body: dict):
                 continue
             lo, hi = _CONFIG_LIMITS[key]
             val = max(lo, min(hi, val))
+        elif kind == "pin":
+            val = str(val).strip()
+            if not val:
+                continue  # blank field = keep the current PIN
+            if not (val.isdigit() and len(val) == 4):
+                errors.append("KJ PIN must be exactly 4 digits")
+                continue
         else:
             if not isinstance(val, str):
                 errors.append(f"{key} must be text")
@@ -684,6 +695,12 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
     # search order fixed once; sorting 50k+ rows per request would sting on a Pi
     ordered = sorted(songs.items(),
                      key=lambda kv: (kv[1]["artist"].lower(), kv[1]["title"].lower()))
+    # Basic operator auth: a 4-digit PIN unlocks /kj + /setup and their
+    # mutating APIs. Login mints an in-memory session token (dropped on restart
+    # -> re-login) delivered as an HttpOnly cookie. Honor-system LAN app, so
+    # this just keeps guests off the console, not a hardened auth system.
+    sessions: set = set()
+    sess_lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -826,17 +843,27 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 return self._html(f.read_text(encoding="utf-8"))
             return self._html(_PLACEHOLDER.format(page=label))
 
+        def _authed(self) -> bool:
+            for part in (self.headers.get("Cookie") or "").split(";"):
+                part = part.strip()
+                if part.startswith("kj_auth="):
+                    with sess_lock:
+                        return part[len("kj_auth="):] in sessions
+            return False
+
         def do_GET(self):
             u = urlparse(self.path)
             parts = [p for p in u.path.split("/") if p]
             if u.path == "/":
                 return self._page("singer.html", "Singer")
-            if u.path == "/kj":
-                return self._page("kj.html", "KJ console")
+            if u.path in ("/kj", "/setup"):
+                # operator surfaces: show the PIN gate until a valid session
+                if not self._authed():
+                    return self._page("kjlogin.html", "Locked")
+                return self._page("kj.html" if u.path == "/kj" else "setup.html",
+                                   "KJ console")
             if u.path == "/screen":
                 return self._page("screen.html", "Screen")
-            if u.path == "/setup":
-                return self._page("setup.html", "Setup")
             if len(parts) == 2 and parts[0] == "static":
                 f = (static_dir / parts[1]).resolve()
                 if f.is_file() and f.parent == static_dir.resolve():
@@ -926,6 +953,34 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
         def do_POST(self):
             u = urlparse(self.path)
             body = self._body()
+            if u.path == "/api/kj/login":
+                pin = str(body.get("pin", "")).strip()
+                if pin and pin == str(cfg.get("kj_pin", "")):
+                    tok = uuid.uuid4().hex
+                    with sess_lock:
+                        sessions.add(tok)
+                    body_b = json.dumps({"ok": True}).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body_b)))
+                    self.send_header("Set-Cookie",
+                                     f"kj_auth={tok}; Path=/; Max-Age=86400; "
+                                     "HttpOnly; SameSite=Lax")
+                    self.end_headers()
+                    self.wfile.write(body_b)
+                    return
+                return self._json({"error": "wrong PIN"}, 401)
+            if u.path == "/api/kj/logout":
+                for part in (self.headers.get("Cookie") or "").split(";"):
+                    part = part.strip()
+                    if part.startswith("kj_auth="):
+                        with sess_lock:
+                            sessions.discard(part[len("kj_auth="):])
+                return self._json({"ok": True})
+            # gate the operator mutations (login/logout handled above)
+            if (u.path.startswith("/api/kj/") or u.path == "/api/setup/config") \
+                    and not self._authed():
+                return self._json({"error": "auth required"}, 401)
             if u.path == "/api/singers":
                 raw = (body.get("name") or "").strip()[:40]
                 if not raw:

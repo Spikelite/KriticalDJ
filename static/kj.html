@@ -53,7 +53,7 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 </head>
 <body>
 <header>
-  <h1>KJ Console <small id="party"></small><a href="/setup">&#9881; Setup</a></h1>
+  <h1>KJ Console <small id="party"></small><a href="/setup">&#9881; Setup</a><a href="#" onclick="logout();return false" style="margin-left:14px">&#128274; Lock</a></h1>
   <div id="status"></div>
   <div id="qsum"></div>
   <div class="bar">
@@ -99,6 +99,7 @@ function entryMove(id,d){ post("/api/kj/entry_move", {entry_id:id, dir:d}); }
 function singerMove(n,d){ post("/api/kj/singer_move", {name:n, dir:d}); }
 function singerKick(n){ if(confirm("Remove "+n+" and their queued songs?")) post("/api/kj/singer_remove",{name:n}); }
 function pinEntry(id){ post("/api/kj/pin", {entry_id:id}); }
+function logout(){ fetch("/api/kj/logout",{method:"POST"}).then(()=>location.reload()); }
 
 function fmtDur(d){ return d ? (Math.floor(d/60)+":"+String(d%60).padStart(2,"0")) : ""; }
 function openVersions(songId){

@@ -328,6 +328,20 @@ def test_validate_config_changes():
     assert cfg["port"] == 8080 and cfg["intermission_seconds"] == 15
 
 
+def test_validate_config_kj_pin():
+    cfg = {"kj_pin": "0000"}
+    # a blank PIN field means "keep current" -- not a change, not an error
+    ch, err, _ = validate_config_changes(cfg, {"kj_pin": ""})
+    assert ch == {} and not err
+    # a valid new 4-digit PIN is accepted
+    ch, err, _ = validate_config_changes(cfg, {"kj_pin": "4821"})
+    assert ch == {"kj_pin": "4821"} and not err
+    # wrong length / non-digits are rejected
+    for bad in ("123", "12345", "12a4"):
+        _, err, _ = validate_config_changes(cfg, {"kj_pin": bad})
+        assert err and "PIN" in err[0], bad
+
+
 def test_scan_versions_from_sidecar():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
