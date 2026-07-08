@@ -4,9 +4,9 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from kriticaldj import (Flow, SingerRegistry, State, Stats, move_entry,
-                        move_singer, parse_title, pick_next, scan_library,
-                        validate_config_changes)
+from kriticaldj import (Flow, SingerRegistry, State, Stats, VersionStore,
+                        move_entry, move_singer, parse_title, pick_next,
+                        scan_library, validate_config_changes)
 
 E = lambda i, s: {"id": i, "singer": s, "song_id": "x"}
 
@@ -326,6 +326,88 @@ def test_validate_config_changes():
         assert sorted(rst) == ["host", "port"]
     # cfg itself is never touched by validation
     assert cfg["port"] == 8080 and cfg["intermission_seconds"] == 15
+
+
+def test_snapshot_shows_selected_version():
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        st = State(td / "s.json")
+        st.versions = VersionStore(td / "versions.json")
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t",
+                       "versions": [{"label": "Best"}, {"label": "Alt"}]},
+                 "y": {"artist": "B", "title": "U", "search": "b u",
+                       "versions": [{"label": "Best"}]}}
+        st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob"]),
+                                  st.queue.extend([E(1, "Ann"),
+                                                   dict(E(2, "Bob"), song_id="y")])))
+        snap = st.snapshot(songs)
+        ann, bob = snap["upcoming"]
+        assert ann["vsel"] == 1                 # default pick displays as v1
+        assert "vsel" not in bob                # single-version: no picker, no vsel
+        st.versions.set("x", 1)
+        assert st.snapshot(songs)["upcoming"][0]["vsel"] == 2  # 1-based
+        st.versions.set("x", 7)                 # stale/out-of-range -> default
+        assert st.snapshot(songs)["upcoming"][0]["vsel"] == 1
+        st.versions = None                      # store not attached (tests, etc.)
+        assert "vsel" not in st.snapshot(songs)["upcoming"][0]
+
+
+def test_validate_config_kj_pin():
+    cfg = {"kj_pin": "0000"}
+    # a blank PIN field means "keep current" -- not a change, not an error
+    ch, err, _ = validate_config_changes(cfg, {"kj_pin": ""})
+    assert ch == {} and not err
+    # a valid new 4-digit PIN is accepted
+    ch, err, _ = validate_config_changes(cfg, {"kj_pin": "4821"})
+    assert ch == {"kj_pin": "4821"} and not err
+    # wrong length / non-digits are rejected
+    for bad in ("123", "12345", "12a4"):
+        _, err, _ = validate_config_changes(cfg, {"kj_pin": bad})
+        assert err and "PIN" in err[0], bad
+
+
+def test_scan_versions_from_sidecar():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "best.mp3").write_bytes(b"m"); (root / "best.cdg").write_bytes(b"c")
+        (root / "alt.zip").write_bytes(b"z")
+        (root / "index.json").write_text(json.dumps({"songs": [
+            {"path": "best.mp3", "artist": "Queen", "title": "Bo Rhap",
+             "duration": 354, "versions": [
+                 {"path": "alt.zip", "label": "SC edit", "duration": 300},
+                 {"path": "gone.mp3", "label": "missing"},  # skipped, no file
+             ]},
+        ]}), encoding="utf-8")
+        songs = scan_library(str(root))
+        s = list(songs.values())[0]
+        # primary keys untouched (back-compat) + a two-entry versions list
+        assert s["mp3"].endswith("best.mp3") and s["duration"] == 354
+        assert [v["label"] for v in s["versions"]] == ["Best", "SC edit"]
+        assert "zip" in s["versions"][1] and s["versions"][1]["duration"] == 300
+
+
+def test_scan_single_version_backcompat():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        d = root / "q"; d.mkdir()
+        (d / "Queen - Bohemian Rhapsody.mp3").write_bytes(b"m")
+        (d / "Queen - Bohemian Rhapsody.cdg").write_bytes(b"c")
+        s = list(scan_library(str(root)).values())[0]
+        # folder-scan libraries get exactly one implicit version
+        assert len(s["versions"]) == 1 and s["mp3"].endswith(".mp3")
+
+
+def test_version_store_persist_and_default():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "versions.json"
+        vs = VersionStore(p)
+        assert vs.get("abc") == 0            # default when unset
+        vs.set("abc", 2)
+        assert vs.get("abc") == 2
+        vs.set("abc", 0)                     # 0 clears the entry (stays lean)
+        assert vs.get("abc") == 0 and "abc" not in vs.by_id
+        vs.set("xyz", 3)
+        assert VersionStore(p).get("xyz") == 3   # survives restart
 
 
 if __name__ == "__main__":

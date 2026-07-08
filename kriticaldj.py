@@ -39,6 +39,9 @@ DEFAULT_CONFIG = {
     # frames relative to audio.currentTime. Calibrate from the KJ console.
     "lyrics_offset_ms": 0,
     "public_url": "",
+    # 4-digit gate for the operator surfaces (/kj, /setup). Change it from the
+    # setup screen; default is deliberately obvious so first boot isn't locked.
+    "kj_pin": "0000",
 }
 
 
@@ -64,6 +67,7 @@ _CONFIG_FIELDS = {
     "party_name": "str", "public_url": "str", "music_root": "dir",
     "host": "str", "port": "int", "intermission_seconds": "int",
     "start_now_countdown_seconds": "int", "lyrics_offset_ms": "int",
+    "kj_pin": "pin",
 }
 _CONFIG_LIMITS = {"port": (1, 65535), "intermission_seconds": (3, 600),
                   "start_now_countdown_seconds": (0, 30),
@@ -91,6 +95,13 @@ def validate_config_changes(cfg: dict, body: dict):
                 continue
             lo, hi = _CONFIG_LIMITS[key]
             val = max(lo, min(hi, val))
+        elif kind == "pin":
+            val = str(val).strip()
+            if not val:
+                continue  # blank field = keep the current PIN
+            if not (val.isdigit() and len(val) == 4):
+                errors.append("KJ PIN must be exactly 4 digits")
+                continue
         else:
             if not isinstance(val, str):
                 errors.append(f"{key} must be text")
@@ -175,6 +186,11 @@ def scan_library(music_root: str) -> dict:
     def add(rel: str, artist: str, title: str, **media) -> None:
         sid = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:12]
         sa, st = _searchable(artist), _searchable(title)
+        # versions[0] mirrors the primary media so the default path is byte-for-
+        # byte the old behavior; alternates (multi-version libraries) append to
+        # this list and the KJ can promote one (see VersionStore / _media_path).
+        v0 = {k: v for k, v in media.items() if k != "label"}
+        v0.setdefault("label", media.get("label", "Best"))
         songs[sid] = {
             "artist": artist,
             "title": title,
@@ -182,6 +198,7 @@ def scan_library(music_root: str) -> dict:
             "sa": sa,   # field-scoped search
             "st": st,
             "ltr": sa[:1].upper() if sa[:1].isalpha() else "#",  # A-Z browse
+            "versions": [v0],
             **media,
         }
 
@@ -197,6 +214,19 @@ def scan_library(music_root: str) -> dict:
                 if e.get("duration"):
                     media["duration"] = int(e["duration"])
                 add(e["path"], e.get("artist", "?"), e.get("title", "?"), **media)
+                # optional alternate versions of the same song: [{path,label,
+                # duration}, ...]. Best copy stays version 0 (the entry above);
+                # these become 1..N, selectable by the KJ.
+                sid = hashlib.sha1(e["path"].encode("utf-8")).hexdigest()[:12]
+                for i, alt in enumerate(e.get("versions", []) or [], start=1):
+                    ap = root / alt.get("path", "")
+                    if not alt.get("path") or not ap.is_file():
+                        continue
+                    am = {"zip": str(ap)} if ap.suffix.lower() == ".zip" else {"mp3": str(ap)}
+                    if alt.get("duration"):
+                        am["duration"] = int(alt["duration"])
+                    am["label"] = alt.get("label") or f"Version {i + 1}"
+                    songs[sid]["versions"].append(am)
         except (ValueError, OSError, KeyError, TypeError):
             songs = {}
         if songs:
@@ -297,6 +327,44 @@ class SingerRegistry:
             return rec["name"], rec["id"]
 
 
+class VersionStore:
+    """Persistent per-song version choice (versions.json): song_id -> index
+    into that song's `versions` list. When a library ships alternate copies of
+    a song, the KJ can promote one and this remembers it across restarts and
+    rescans (song ids are stable path hashes). 0 is the default (best) copy and
+    is never stored; session resets never touch this -- it's a library setting,
+    not party state."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.by_id: dict = {}
+        if path.exists():
+            try:
+                self.by_id = json.loads(path.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                self.by_id = {}
+
+    def get(self, song_id: str) -> int:
+        try:
+            return int(self.by_id.get(song_id, 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def set(self, song_id: str, index: int) -> None:
+        with self.lock:
+            if index <= 0:
+                self.by_id.pop(song_id, None)  # 0 = default; keep the file lean
+            else:
+                self.by_id[song_id] = int(index)
+            try:
+                tmp = self.path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(self.by_id, indent=1), encoding="utf-8")
+                os.replace(tmp, self.path)
+            except OSError:
+                pass
+
+
 class Stats:
     """Append-only party history (stats.jsonl): one JSON line per event
     (queued / started / completed / skipped / removed / session_reset).
@@ -366,6 +434,8 @@ class State:
         self.phase = "idle"              # idle|playing|intermission|countdown
         self.deadline = 0.0              # epoch when intermission/countdown ends
         self.transport = {"cmd": "play", "seq": 0}
+        self.versions = None             # VersionStore, attached in main();
+                                         # snapshots show each song's active pick
         self.next_entry_id = 1
         # The locked "up next" slot: entry id, or None. Once someone is
         # projected next they stay next -- people plan around it (see UAT).
@@ -457,9 +527,16 @@ class State:
     def snapshot(self, songs: dict) -> dict:
         def song_view(e):
             s = songs.get(e["song_id"], {})
-            return {"id": e["id"], "singer": e["singer"], "song_id": e["song_id"],
-                    "artist": s.get("artist", "?"), "title": s.get("title", "?"),
-                    "duration": s.get("duration")}
+            nv = len(s.get("versions") or [])
+            row = {"id": e["id"], "singer": e["singer"], "song_id": e["song_id"],
+                   "artist": s.get("artist", "?"), "title": s.get("title", "?"),
+                   "duration": s.get("duration"), "nversions": nv}
+            if nv > 1 and self.versions is not None:
+                idx = self.versions.get(e["song_id"])
+                # 1-based for display (v1 = best); out-of-range picks fall back
+                # to the default, mirroring _media_path
+                row["vsel"] = (idx if 0 <= idx < nv else 0) + 1
+            return row
         with self.lock:
             up = self.rotation_preview()
             out = {
@@ -620,18 +697,33 @@ _PLACEHOLDER = ("<!DOCTYPE html><meta charset='utf-8'><title>KriticalDJ</title>"
 
 
 def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flow,
-                 registry: SingerRegistry, stats: Stats):
+                 registry: SingerRegistry, stats: Stats, versions: VersionStore):
     media_cache = ROOT / ".media-cache"
     static_dir = ROOT / "static"
     # search order fixed once; sorting 50k+ rows per request would sting on a Pi
     ordered = sorted(songs.items(),
                      key=lambda kv: (kv[1]["artist"].lower(), kv[1]["title"].lower()))
+    # Basic operator auth: a 4-digit PIN unlocks /kj + /setup and their
+    # mutating APIs. Login mints an in-memory session token (dropped on restart
+    # -> re-login) delivered as an HttpOnly cookie. Honor-system LAN app, so
+    # this just keeps guests off the console, not a hardened auth system.
+    sessions: set = set()
+    sess_lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
         def log_message(self, fmt, *args):  # quiet
             pass
+
+        def handle(self):
+            # Phones and kiosk browsers drop connections constantly: page
+            # reloads, aborted media range requests, walking out of WiFi
+            # range. Routine, not worth a stack trace on the console.
+            try:
+                super().handle()
+            except (ConnectionError, TimeoutError):
+                pass
 
         # ---- helpers -----------------------------------------------------
         def _json(self, obj, code=200):
@@ -664,32 +756,42 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
             s = songs.get(song_id)
             if not s or kind not in ("mp3", "cdg"):
                 return None
-            if kind in s:
-                return Path(s[kind])
-            if kind == "cdg" and "mp3" in s:
+            # Resolve the active version. Version 0 reads the primary keys off
+            # the song dict itself (identical to the pre-multi-version path);
+            # an alternate reads from its own media dict with a per-version
+            # cache key so extractions never collide.
+            vlist = s.get("versions") or []
+            idx = versions.get(song_id)
+            if 0 < idx < len(vlist):
+                v, cache_key = vlist[idx], f"{song_id}.v{idx}"
+            else:
+                v, cache_key = s, song_id
+            if kind in v:
+                return Path(v[kind])
+            if kind == "cdg" and "mp3" in v:
                 # sidecar entries carry only the mp3 path; find the twin lazily
                 for suf in (".cdg", ".CDG", ".Cdg"):
-                    c = Path(s["mp3"]).with_suffix(suf)
+                    c = Path(v["mp3"]).with_suffix(suf)
                     if c.exists():
-                        s["cdg"] = str(c)
+                        v["cdg"] = str(c)
                         return c
                 return None
-            if "zip" in s:  # extract once into the cache
-                if f"zip_{kind}" not in s:  # sidecar zips: discover members lazily
-                    with zipfile.ZipFile(s["zip"]) as z:
+            if "zip" in v:  # extract once into the cache
+                if f"zip_{kind}" not in v:  # sidecar zips: discover members lazily
+                    with zipfile.ZipFile(v["zip"]) as z:
                         for n in z.namelist():
                             ln = n.lower()
                             if ln.endswith(".mp3"):
-                                s.setdefault("zip_mp3", n)
+                                v.setdefault("zip_mp3", n)
                             elif ln.endswith(".cdg"):
-                                s.setdefault("zip_cdg", n)
-                if f"zip_{kind}" not in s:
+                                v.setdefault("zip_cdg", n)
+                if f"zip_{kind}" not in v:
                     return None
                 media_cache.mkdir(exist_ok=True)
-                out = media_cache / f"{song_id}.{kind}"
+                out = media_cache / f"{cache_key}.{kind}"
                 if not out.exists():
-                    with zipfile.ZipFile(s["zip"]) as z:
-                        out.write_bytes(z.read(s[f"zip_{kind}"]))
+                    with zipfile.ZipFile(v["zip"]) as z:
+                        out.write_bytes(z.read(v[f"zip_{kind}"]))
                 return out
             return None
 
@@ -758,17 +860,27 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 return self._html(f.read_text(encoding="utf-8"))
             return self._html(_PLACEHOLDER.format(page=label))
 
+        def _authed(self) -> bool:
+            for part in (self.headers.get("Cookie") or "").split(";"):
+                part = part.strip()
+                if part.startswith("kj_auth="):
+                    with sess_lock:
+                        return part[len("kj_auth="):] in sessions
+            return False
+
         def do_GET(self):
             u = urlparse(self.path)
             parts = [p for p in u.path.split("/") if p]
             if u.path == "/":
                 return self._page("singer.html", "Singer")
-            if u.path == "/kj":
-                return self._page("kj.html", "KJ console")
+            if u.path in ("/kj", "/setup"):
+                # operator surfaces: show the PIN gate until a valid session
+                if not self._authed():
+                    return self._page("kjlogin.html", "Locked")
+                return self._page("kj.html" if u.path == "/kj" else "setup.html",
+                                   "KJ console")
             if u.path == "/screen":
                 return self._page("screen.html", "Screen")
-            if u.path == "/setup":
-                return self._page("setup.html", "Setup")
             if len(parts) == 2 and parts[0] == "static":
                 f = (static_dir / parts[1]).resolve()
                 if f.is_file() and f.parent == static_dir.resolve():
@@ -816,6 +928,19 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                                    "top_played": played.most_common(10),
                                    "top_queued": queued.most_common(10),
                                    "top_singers": singers_c.most_common(10)})
+            if u.path == "/api/song_versions":
+                sid = parse_qs(u.query).get("song_id", [""])[0]
+                s = songs.get(sid)
+                if not s:
+                    return self._json({"error": "unknown song"}, 404)
+                vlist = s.get("versions") or []
+                return self._json({
+                    "song_id": sid, "artist": s["artist"], "title": s["title"],
+                    "active": versions.get(sid),
+                    "versions": [{"index": i, "label": v.get("label", f"Version {i + 1}"),
+                                  "duration": v.get("duration")}
+                                 for i, v in enumerate(vlist)],
+                })
             if u.path == "/api/songs":
                 qs = parse_qs(u.query)
                 toks = _searchable(" ".join(qs.get("q", [""]))).split()
@@ -845,6 +970,34 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
         def do_POST(self):
             u = urlparse(self.path)
             body = self._body()
+            if u.path == "/api/kj/login":
+                pin = str(body.get("pin", "")).strip()
+                if pin and pin == str(cfg.get("kj_pin", "")):
+                    tok = uuid.uuid4().hex
+                    with sess_lock:
+                        sessions.add(tok)
+                    body_b = json.dumps({"ok": True}).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body_b)))
+                    self.send_header("Set-Cookie",
+                                     f"kj_auth={tok}; Path=/; Max-Age=86400; "
+                                     "HttpOnly; SameSite=Lax")
+                    self.end_headers()
+                    self.wfile.write(body_b)
+                    return
+                return self._json({"error": "wrong PIN"}, 401)
+            if u.path == "/api/kj/logout":
+                for part in (self.headers.get("Cookie") or "").split(";"):
+                    part = part.strip()
+                    if part.startswith("kj_auth="):
+                        with sess_lock:
+                            sessions.discard(part[len("kj_auth="):])
+                return self._json({"ok": True})
+            # gate the operator mutations (login/logout handled above)
+            if (u.path.startswith("/api/kj/") or u.path == "/api/setup/config") \
+                    and not self._authed():
+                return self._json({"error": "auth required"}, 401)
             if u.path == "/api/singers":
                 raw = (body.get("name") or "").strip()[:40]
                 if not raw:
@@ -988,6 +1141,22 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 except OSError:
                     pass
                 return self._json({"ok": True, "lyrics_offset_ms": cfg["lyrics_offset_ms"]})
+            if u.path == "/api/kj/version":
+                sid = body.get("song_id")
+                s = songs.get(sid)
+                if not s:
+                    return self._json({"error": "unknown song"}, 400)
+                n = len(s.get("versions") or [])
+                try:
+                    idx = int(body.get("index", 0))
+                except (TypeError, ValueError):
+                    idx = 0
+                if idx < 0 or idx >= n:
+                    return self._json({"error": "version out of range"}, 400)
+                versions.set(sid, idx)
+                # nudge the surfaces so a version swap shows up live
+                state.mutate(songs, lambda: None)
+                return self._json({"ok": True, "song_id": sid, "active": idx})
             if u.path.startswith("/api/kj/"):
                 cmd = u.path.rsplit("/", 1)[1]
                 if cmd in ("play", "pause"):
@@ -1036,11 +1205,13 @@ def main() -> None:
     state.extra["lyrics_offset_ms"] = cfg["lyrics_offset_ms"]
     registry = SingerRegistry(ROOT / "singers.json")
     stats = Stats(ROOT / "stats.jsonl", registry)
+    versions = VersionStore(ROOT / "versions.json")
+    state.versions = versions  # snapshots surface each song's active pick
     flow = Flow(state, songs, cfg, stats)
     threading.Thread(target=flow.tick_forever, daemon=True).start()
     server = ThreadingHTTPServer((cfg["host"], cfg["port"]),
                                  make_handler(cfg, cfg_path, state, songs, flow,
-                                              registry, stats))
+                                              registry, stats, versions))
     server.daemon_threads = True
     print(f"[{APP}] singers: {lan_url(cfg)}  |  KJ: {lan_url(cfg)}kj  |  screen: {lan_url(cfg)}screen")
     server.serve_forever()

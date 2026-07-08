@@ -39,11 +39,21 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 .chip button{border:none;background:none;color:var(--dim);cursor:pointer;font-size:13px;padding:2px 5px}
 .chip button.x{color:var(--warn)}
 .empty{color:var(--dim);font-size:14px;padding:8px 16px}
+#vov{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:9}
+#vov.on{display:flex}
+#vbox{background:var(--panel);border:1px solid #3a3f47;border-radius:12px;padding:16px;max-width:90%;width:420px;max-height:80vh;overflow:auto}
+#vbox h3{margin:0 0 4px;font-size:16px}
+#vbox .sub{color:var(--dim);font-size:13px;margin-bottom:10px}
+#vbox .vrow{display:flex;align-items:center;gap:8px;padding:10px;border:1px solid #3a3f47;border-radius:8px;margin-bottom:6px;cursor:pointer}
+#vbox .vrow.act{border-color:var(--ok);background:#12241a}
+#vbox .vrow .g{flex:1}
+#vbox .vrow .tag{color:var(--ok);font-size:12px}
+#vbox .cls{margin-top:6px;width:100%;background:var(--bg)}
 </style>
 </head>
 <body>
 <header>
-  <h1>KJ Console <small id="party"></small><a href="/setup">&#9881; Setup</a></h1>
+  <h1>KJ Console <small id="party"></small><a href="/setup">&#9881; Setup</a><a href="#" onclick="logout();return false" style="margin-left:14px">&#128274; Lock</a></h1>
   <div id="status"></div>
   <div id="qsum"></div>
   <div class="bar">
@@ -68,6 +78,13 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 <section><h2>Singers (rotation order)</h2><div class="chips" id="singers"></div></section>
 <section><h2>Queue by singer</h2><div id="queue"></div></section>
 
+<div id="vov"><div id="vbox">
+  <h3 id="vtitle"></h3>
+  <div class="sub">Pick the version to play. The choice is remembered.</div>
+  <div id="vlist"></div>
+  <button class="cls" onclick="closeVersions()">Close</button>
+</div></div>
+
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
@@ -82,6 +99,27 @@ function entryMove(id,d){ post("/api/kj/entry_move", {entry_id:id, dir:d}); }
 function singerMove(n,d){ post("/api/kj/singer_move", {name:n, dir:d}); }
 function singerKick(n){ if(confirm("Remove "+n+" and their queued songs?")) post("/api/kj/singer_remove",{name:n}); }
 function pinEntry(id){ post("/api/kj/pin", {entry_id:id}); }
+function logout(){ fetch("/api/kj/logout",{method:"POST"}).then(()=>location.reload()); }
+
+function fmtDur(d){ return d ? (Math.floor(d/60)+":"+String(d%60).padStart(2,"0")) : ""; }
+function openVersions(songId){
+  fetch("/api/song_versions?song_id="+encodeURIComponent(songId)).then(r=>r.json()).then(d=>{
+    if(d.error) return;
+    $("vtitle").textContent = d.artist+" — "+d.title;
+    const box=$("vlist"); box.textContent="";
+    d.versions.forEach(v=>{
+      const row=document.createElement("div"); row.className="vrow"+(v.index===d.active?" act":"");
+      const g=document.createElement("div"); g.className="g";
+      g.textContent="v"+(v.index+1)+" · "+v.label+(v.duration?("  ("+fmtDur(v.duration)+")"):""); row.appendChild(g);
+      if(v.index===d.active){ const t=document.createElement("span"); t.className="tag"; t.textContent="✓ playing"; row.appendChild(t); }
+      row.onclick=()=>{ post("/api/kj/version", {song_id:songId, index:v.index}); openVersions(songId); };
+      box.appendChild(row);
+    });
+    $("vov").classList.add("on");
+  });
+}
+function closeVersions(){ $("vov").classList.remove("on"); }
+$("vov")&&($("vov").onclick=e=>{ if(e.target.id==="vov") closeVersions(); });
 function delEntry(id){ fetch("/api/queue/"+id, {method:"DELETE"}); }
 
 function fmtWait(sec){
@@ -144,6 +182,11 @@ function render(){
     if(e.id!==st.pinned){
       const p=mkbtn("Next","",()=>pinEntry(e.id));
       p.title="Lock this in as the up-next slot"; r.appendChild(p);
+    }
+    if(e.nversions>1){
+      const vb=mkbtn("⧉ v"+(e.vsel||1),"",()=>openVersions(e.song_id));
+      vb.title="Playing version "+(e.vsel||1)+" of "+e.nversions+" — click to change";
+      r.appendChild(vb);
     }
     r.appendChild(mkbtn("✕","x",()=>delEntry(e.id)));
     up.appendChild(r);
