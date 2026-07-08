@@ -716,6 +716,15 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
         def log_message(self, fmt, *args):  # quiet
             pass
 
+        def handle(self):
+            # Phones and kiosk browsers drop connections constantly: page
+            # reloads, aborted media range requests, walking out of WiFi
+            # range. Routine, not worth a stack trace on the console.
+            try:
+                super().handle()
+            except (ConnectionError, TimeoutError):
+                pass
+
         # ---- helpers -----------------------------------------------------
         def _json(self, obj, code=200):
             body = json.dumps(obj).encode("utf-8")
