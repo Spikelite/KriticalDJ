@@ -772,8 +772,10 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
             if len(parts) == 2 and parts[0] == "static":
                 f = (static_dir / parts[1]).resolve()
                 if f.is_file() and f.parent == static_dir.resolve():
-                    ctype = "text/javascript" if f.suffix == ".js" else "text/css" \
-                        if f.suffix == ".css" else "application/octet-stream"
+                    ctype = {".js": "text/javascript", ".css": "text/css",
+                             ".html": "text/html; charset=utf-8",
+                             ".png": "image/png", ".svg": "image/svg+xml",
+                             }.get(f.suffix, "application/octet-stream")
                     return self._serve_file(f, ctype)
                 return self._json({"error": "not found"}, 404)
             if u.path == "/events":

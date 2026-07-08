@@ -24,12 +24,45 @@ Then open, in a browser:
 | `/` | Singers (BYOD phones/tablets) | Search the library (all / artist / song title, A–Z browse), pick your name, queue songs |
 | `/kj` | The KJ (host machine) | Play / Pause / Skip, Start-now, lyrics-sync nudge, queue & rotation management, queue-length summary |
 | `/screen` | The TV/projector (fullscreen browser) | Lyrics during songs; NOW / NEXT / rotation + QR between songs |
-| `/setup` | The KJ, before/after the party | Rescan library, reset session, statistics, config overview |
+| `/setup` | The KJ, before/after the party | Rescan library, reset session, statistics, live config editing |
 
-No accounts, no auth — it's a karaoke party, the honor system runs the door.
+No accounts for singers — it's a karaoke party, the honor system runs the
+door. The KJ console and setup screen are gated by a 4-digit PIN (`kj_pin`,
+default `0000` — change it from the setup screen).
 
 Deploying on a Raspberry Pi (systemd service, dual-screen Chromium kiosk,
 Bluetooth audio calibration): see [DEPLOY.md](DEPLOY.md).
+
+## What it looks like
+
+**The TV.** Between songs, the rotation board: who's up, who's next, and a QR
+code guests scan to join. During songs, CDG lyrics with the singer, the
+up-next call-out over the last 15 seconds, and a corner track timer.
+*(Playback shot below is a mockup — lyric graphics come from your CDG files.)*
+
+<p>
+  <img src="docs/screen-board.png" width="49%" alt="TV intermission board: grab the mic, rotation, QR code">
+  <img src="docs/screen-play.png" width="49%" alt="TV playback view: CDG lyrics, singer header, up-next banner, track timer">
+</p>
+
+**The KJ console.** Transport (Play / Pause / Start over / Skip / Singer's
+next / Start now), live lyrics-sync nudges, the rotation with the locked
+up-next slot (🔒), per-song version pickers (⧉), singer and queue management —
+behind the 4-digit PIN.
+
+<p>
+  <img src="docs/kj-console.png" width="70%" alt="KJ console: transport bar, rotation with locked next and version buttons, singers, queue">
+  <img src="docs/kj-lock.png" width="24%" alt="KJ PIN lock screen">
+</p>
+
+**Singers' phones and setup.** Guests search/browse and queue from their own
+devices — the name dropdown means nobody queues as someone else by accident.
+Setup handles the library, sessions, stats, and all config, live.
+
+<p>
+  <img src="docs/singer.png" width="38%" alt="Singer UI on a phone: name dropdown, search, browse list">
+  <img src="docs/setup.png" width="55%" alt="Setup page: library rescan, session reset, statistics, editable configuration">
+</p>
 
 ## How the rotation works
 
