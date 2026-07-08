@@ -434,6 +434,8 @@ class State:
         self.phase = "idle"              # idle|playing|intermission|countdown
         self.deadline = 0.0              # epoch when intermission/countdown ends
         self.transport = {"cmd": "play", "seq": 0}
+        self.versions = None             # VersionStore, attached in main();
+                                         # snapshots show each song's active pick
         self.next_entry_id = 1
         # The locked "up next" slot: entry id, or None. Once someone is
         # projected next they stay next -- people plan around it (see UAT).
@@ -525,10 +527,16 @@ class State:
     def snapshot(self, songs: dict) -> dict:
         def song_view(e):
             s = songs.get(e["song_id"], {})
-            return {"id": e["id"], "singer": e["singer"], "song_id": e["song_id"],
-                    "artist": s.get("artist", "?"), "title": s.get("title", "?"),
-                    "duration": s.get("duration"),
-                    "nversions": len(s.get("versions") or [])}
+            nv = len(s.get("versions") or [])
+            row = {"id": e["id"], "singer": e["singer"], "song_id": e["song_id"],
+                   "artist": s.get("artist", "?"), "title": s.get("title", "?"),
+                   "duration": s.get("duration"), "nversions": nv}
+            if nv > 1 and self.versions is not None:
+                idx = self.versions.get(e["song_id"])
+                # 1-based for display (v1 = best); out-of-range picks fall back
+                # to the default, mirroring _media_path
+                row["vsel"] = (idx if 0 <= idx < nv else 0) + 1
+            return row
         with self.lock:
             up = self.rotation_preview()
             out = {
@@ -1189,6 +1197,7 @@ def main() -> None:
     registry = SingerRegistry(ROOT / "singers.json")
     stats = Stats(ROOT / "stats.jsonl", registry)
     versions = VersionStore(ROOT / "versions.json")
+    state.versions = versions  # snapshots surface each song's active pick
     flow = Flow(state, songs, cfg, stats)
     threading.Thread(target=flow.tick_forever, daemon=True).start()
     server = ThreadingHTTPServer((cfg["host"], cfg["port"]),

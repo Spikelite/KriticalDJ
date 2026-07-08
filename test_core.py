@@ -328,6 +328,30 @@ def test_validate_config_changes():
     assert cfg["port"] == 8080 and cfg["intermission_seconds"] == 15
 
 
+def test_snapshot_shows_selected_version():
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        st = State(td / "s.json")
+        st.versions = VersionStore(td / "versions.json")
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t",
+                       "versions": [{"label": "Best"}, {"label": "Alt"}]},
+                 "y": {"artist": "B", "title": "U", "search": "b u",
+                       "versions": [{"label": "Best"}]}}
+        st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob"]),
+                                  st.queue.extend([E(1, "Ann"),
+                                                   dict(E(2, "Bob"), song_id="y")])))
+        snap = st.snapshot(songs)
+        ann, bob = snap["upcoming"]
+        assert ann["vsel"] == 1                 # default pick displays as v1
+        assert "vsel" not in bob                # single-version: no picker, no vsel
+        st.versions.set("x", 1)
+        assert st.snapshot(songs)["upcoming"][0]["vsel"] == 2  # 1-based
+        st.versions.set("x", 7)                 # stale/out-of-range -> default
+        assert st.snapshot(songs)["upcoming"][0]["vsel"] == 1
+        st.versions = None                      # store not attached (tests, etc.)
+        assert "vsel" not in st.snapshot(songs)["upcoming"][0]
+
+
 def test_validate_config_kj_pin():
     cfg = {"kj_pin": "0000"}
     # a blank PIN field means "keep current" -- not a change, not an error

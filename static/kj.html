@@ -110,7 +110,7 @@ function openVersions(songId){
     d.versions.forEach(v=>{
       const row=document.createElement("div"); row.className="vrow"+(v.index===d.active?" act":"");
       const g=document.createElement("div"); g.className="g";
-      g.textContent=v.label+(v.duration?("  ("+fmtDur(v.duration)+")"):""); row.appendChild(g);
+      g.textContent="v"+(v.index+1)+" · "+v.label+(v.duration?("  ("+fmtDur(v.duration)+")"):""); row.appendChild(g);
       if(v.index===d.active){ const t=document.createElement("span"); t.className="tag"; t.textContent="✓ playing"; row.appendChild(t); }
       row.onclick=()=>{ post("/api/kj/version", {song_id:songId, index:v.index}); openVersions(songId); };
       box.appendChild(row);
@@ -184,8 +184,9 @@ function render(){
       p.title="Lock this in as the up-next slot"; r.appendChild(p);
     }
     if(e.nversions>1){
-      const vb=mkbtn("⧉ v"+e.nversions,"",()=>openVersions(e.song_id));
-      vb.title="Choose which version of this track plays"; r.appendChild(vb);
+      const vb=mkbtn("⧉ v"+(e.vsel||1),"",()=>openVersions(e.song_id));
+      vb.title="Playing version "+(e.vsel||1)+" of "+e.nversions+" — click to change";
+      r.appendChild(vb);
     }
     r.appendChild(mkbtn("✕","x",()=>delEntry(e.id)));
     up.appendChild(r);
