@@ -123,5 +123,6 @@ run a private hostname (e.g. `karaoke.lan`), set it as `public_url` in
 |---|---|---|
 | `state.json` | live party state (crash recovery) | yes — clears the current party |
 | `singers.json` | persistent singer-ID registry | keep — stats reference these ids |
+| `versions.json` | KJ's per-song version picks | keep — or resets a song to its best copy |
 | `stats.jsonl` | append-only event history | keep — it's your party history |
 | `.media-cache/` | zip extractions | yes — rebuilt on demand |

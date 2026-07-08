@@ -101,6 +101,7 @@ top singers); the raw log is plain JSON-lines for any deeper analysis.
 | `start_now_countdown_seconds` | `3` | countdown after the KJ hits Start now |
 | `lyrics_offset_ms` | `0` | shift lyrics to match Bluetooth speaker latency (KJ-adjustable) |
 | `public_url` | *(auto-detected)* | URL encoded in the on-screen QR code |
+| `kj_pin` | `0000` | 4-digit code gating `/kj` + `/setup` (change it from the setup screen) |
 
 ## Status
 
