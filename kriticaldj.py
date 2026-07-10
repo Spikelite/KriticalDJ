@@ -751,6 +751,15 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
             except ValueError:
                 return {}
 
+        @staticmethod
+        def _int_arg(body: dict, key: str, default=None):
+            """Integer body field, or None for absent/garbage values so the
+            endpoint can 400 instead of tracebacking to a 500."""
+            try:
+                return int(body.get(key, default))
+            except (TypeError, ValueError):
+                return None
+
         # ---- media -------------------------------------------------------
         def _media_path(self, song_id: str, kind: str) -> Path | None:
             s = songs.get(song_id)
@@ -1031,7 +1040,9 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 flow.song_ended()
                 return self._json({"ok": True})
             if u.path == "/api/kj/pin":
-                eid = int(body.get("entry_id", -1))
+                eid = self._int_arg(body, "entry_id")
+                if eid is None:
+                    return self._json({"error": "entry_id must be a number"}, 400)
                 ok = []
                 def fn():
                     # explicit KJ override: hand the locked up-next slot to
@@ -1042,21 +1053,26 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 state.mutate(songs, fn)
                 return self._json({"ok": ok[0]})
             if u.path == "/api/kj/entry_move":
+                eid = self._int_arg(body, "entry_id")
+                direction = self._int_arg(body, "dir")
+                if eid is None or direction is None:
+                    return self._json({"error": "entry_id and dir must be numbers"}, 400)
                 moved = []
                 def fn():
-                    moved.append(move_entry(state.queue,
-                                            int(body.get("entry_id", -1)),
-                                            int(body.get("dir", 0))))
+                    moved.append(move_entry(state.queue, eid, direction))
                     if moved[0]:  # KJ reorder overrides the up-next lock
                         state.pinned = None
                 state.mutate(songs, fn)
                 return self._json({"ok": moved[0]})
             if u.path == "/api/kj/singer_move":
+                direction = self._int_arg(body, "dir")
+                if direction is None:
+                    return self._json({"error": "dir must be a number"}, 400)
                 moved = []
                 def fn():
                     moved.append(move_singer(state.singers,
                                              (body.get("name") or "").strip(),
-                                             int(body.get("dir", 0))))
+                                             direction))
                     if moved[0]:  # KJ reorder overrides the up-next lock
                         state.pinned = None
                 state.mutate(songs, fn)
@@ -1132,7 +1148,9 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                                    "errors": errors, "restart_needed": restart,
                                    "count": count})
             if u.path == "/api/kj/offset":
-                delta = int(body.get("delta", 0))
+                delta = self._int_arg(body, "delta", 0)
+                if delta is None:
+                    return self._json({"error": "delta must be a number"}, 400)
                 def fn():
                     v = int(cfg.get("lyrics_offset_ms", 0)) + delta
                     cfg["lyrics_offset_ms"] = max(-2000, min(2000, v))
@@ -1149,10 +1167,9 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 if not s:
                     return self._json({"error": "unknown song"}, 400)
                 n = len(s.get("versions") or [])
-                try:
-                    idx = int(body.get("index", 0))
-                except (TypeError, ValueError):
-                    idx = 0
+                idx = self._int_arg(body, "index", 0)
+                if idx is None:  # garbage must 400, not silently mean "best"
+                    return self._json({"error": "index must be a number"}, 400)
                 if idx < 0 or idx >= n:
                     return self._json({"error": "version out of range"}, 400)
                 versions.set(sid, idx)
