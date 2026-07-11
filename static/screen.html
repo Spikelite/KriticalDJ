@@ -181,7 +181,10 @@ setInterval(() => {
   if (!STATE) return;
   const remain = Math.max(0, STATE.deadline - (Date.now() / 1000 + clockOff));
   if (STATE.phase === "intermission") {
-    $("timer").textContent = STATE.upcoming.length ? Math.ceil(remain) : "";
+    // a held countdown (KJ pause, or empty queue) shows parked, not ticking
+    $("timer").textContent = !STATE.upcoming.length ? ""
+      : STATE.held ? "⏸ " + Math.ceil(STATE.hold_remaining || 0)
+      : Math.ceil(remain);
   } else if (STATE.phase === "countdown") {
     $("bignum").textContent = Math.max(1, Math.ceil(remain));
   } else if (STATE.phase === "playing") {
