@@ -441,6 +441,10 @@ class State:
         # projected next they stay next -- people plan around it (see UAT).
         # Passive queue adds can never displace it; KJ reorders reset it.
         self.pinned: int | None = None
+        # Intermission hold: seconds left on a FROZEN countdown, or None when
+        # it is running. Set while the KJ has Pause down or the queue is
+        # empty; the tick loop owns the transitions (see Flow.tick_once).
+        self.hold_remaining: float | None = None
         self._load()
 
     # -- persistence -------------------------------------------------------
@@ -463,6 +467,7 @@ class State:
         if self.phase in ("playing", "countdown", "intermission"):
             self.phase = "intermission"
             self.deadline = time.time() + 5
+            self.hold_remaining = None  # fresh countdown; tick re-holds if due
 
     def _save(self) -> None:
         d = {k: getattr(self, k) for k in
@@ -550,6 +555,8 @@ class State:
                 "singers": list(self.singers),
                 "transport": dict(self.transport),
                 "pinned": self.pinned,
+                "held": self.hold_remaining is not None,
+                "hold_remaining": self.hold_remaining,
             }
             out.update(self.extra)
             return out
@@ -587,6 +594,7 @@ class Flow:
             st.pinned = None  # consumed; mutate() re-pins the new next
             st.now = e
             st.phase = "playing"
+            st.hold_remaining = None
             st.transport = {"cmd": "play", "seq": st.transport["seq"] + 1}
             began.append(e)
         st.mutate(self.songs, fn)
@@ -614,6 +622,7 @@ class Flow:
             if st.phase in ("intermission", "idle"):
                 st.phase = "countdown"
                 st.deadline = time.time() + self.cfg["start_now_countdown_seconds"]
+                st.hold_remaining = None  # explicit go overrides any hold
         st.mutate(self.songs, fn)
 
     def transport_cmd(self, cmd: str) -> None:
@@ -668,23 +677,56 @@ class Flow:
         if started and self.stats:
             self.stats.log("started", started[0]["singer"], self._info(started[0]["song_id"]))
 
+    def tick_once(self) -> None:
+        """One scheduling step: manage the intermission hold, advance phases
+        whose deadline has passed, and wake an idle stage when songs arrive.
+
+        The hold freezes the intermission countdown while the KJ has Pause
+        down OR nothing is queued. Manual pause always wins: a queue add
+        never resumes a paused countdown. Releasing a hold resumes from the
+        frozen remaining time, not a fresh intermission."""
+        st = self.state
+        with st.lock:
+            freeze = (st.phase == "intermission"
+                      and (st.transport["cmd"] == "pause"
+                           or not st.rotation_preview(1)))
+            enter_hold = freeze and st.hold_remaining is None
+            exit_hold = (not freeze and st.hold_remaining is not None
+                         and st.phase == "intermission")
+            stale_hold = (st.hold_remaining is not None
+                          and st.phase != "intermission")
+            due = (st.phase in ("intermission", "countdown")
+                   and st.hold_remaining is None
+                   and time.time() >= st.deadline)
+            idle_ready = st.phase == "idle" and st.rotation_preview(1)
+        if enter_hold:
+            def fn():
+                st.hold_remaining = max(0.0, st.deadline - time.time())
+            st.mutate(self.songs, fn)
+        elif exit_hold:
+            def fn():
+                st.deadline = time.time() + (st.hold_remaining or 0.0)
+                st.hold_remaining = None
+            st.mutate(self.songs, fn)
+        elif stale_hold:
+            # phase moved on under the hold (start_now, reset, ...): drop it
+            def fn():
+                st.hold_remaining = None
+            st.mutate(self.songs, fn)
+        elif due:
+            self._begin_next()
+        elif idle_ready:
+            # first song of the night gets the intermission board + QR
+            def fn():
+                st.phase = "intermission"
+                st.deadline = time.time() + self.cfg["intermission_seconds"]
+            st.mutate(self.songs, fn)
+
     def tick_forever(self) -> None:
-        """Background thread: advance phases whose deadline has passed, and
-        wake an idle stage when songs arrive."""
+        """Background thread: run the scheduler twice a second."""
         while True:
             time.sleep(0.5)
-            st = self.state
-            with st.lock:
-                due = st.phase in ("intermission", "countdown") and time.time() >= st.deadline
-                idle_ready = st.phase == "idle" and st.rotation_preview(1)
-            if due:
-                self._begin_next()
-            elif idle_ready:
-                # first song of the night gets the intermission board + QR
-                def fn():
-                    st.phase = "intermission"
-                    st.deadline = time.time() + self.cfg["intermission_seconds"]
-                st.mutate(self.songs, fn)
+            self.tick_once()
 
 
 # --------------------------------------------------------------------------
@@ -1100,6 +1142,7 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                     state.pinned = None
                     state.phase = "idle"
                     state.deadline = 0.0
+                    state.hold_remaining = None
                 state.mutate(songs, fn)
                 stats.log("session_reset")  # party boundary marker for summaries
                 return self._json({"ok": True})

@@ -1,6 +1,7 @@
 """KriticalDJ core tests -- stdlib only, run with:  python test_core.py"""
 import json
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -408,6 +409,111 @@ def test_version_store_persist_and_default():
         assert vs.get("abc") == 0 and "abc" not in vs.by_id
         vs.set("xyz", 3)
         assert VersionStore(p).get("xyz") == 3   # survives restart
+
+
+def _force_deadline_past(st, songs):
+    def fn():
+        st.deadline = time.time() - 1
+    st.mutate(songs, fn)
+
+
+def test_intermission_holds_on_pause():
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(td / "state.json")
+        flow = Flow(st, songs, {"intermission_seconds": 5})
+        st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob"]),
+                                  st.queue.extend([E(1, "Ann"), E(2, "Bob")])))
+        flow._begin_next()                    # Ann on stage
+        flow.transport_cmd("pause")
+        flow.song_ended()                     # enters intermission while paused
+        flow.tick_once()
+        assert st.hold_remaining is not None  # frozen on entry
+        assert 4.0 <= st.hold_remaining <= 5.0
+        assert st.snapshot(songs)["held"] is True
+        # a passed deadline must NOT advance while held
+        _force_deadline_past(st, songs)
+        flow.tick_once()
+        assert st.phase == "intermission" and st.now is None
+        # unpause resumes from the frozen remaining, then plays on expiry
+        flow.transport_cmd("play")
+        flow.tick_once()
+        assert st.hold_remaining is None
+        assert st.deadline > time.time() + 3  # resumed with ~4-5s left
+        _force_deadline_past(st, songs)
+        flow.tick_once()
+        assert st.phase == "playing" and st.now["singer"] == "Bob"
+
+
+def test_intermission_autoholds_when_queue_empty():
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(td / "state.json")
+        flow = Flow(st, songs, {"intermission_seconds": 5})
+        st.mutate(songs, lambda: (st.singers.append("Ann"),
+                                  st.queue.append(E(1, "Ann"))))
+        flow._begin_next()                    # queue is now empty
+        flow.song_ended()
+        flow.tick_once()
+        assert st.hold_remaining is not None  # auto-held: nothing queued
+        _force_deadline_past(st, songs)
+        flow.tick_once()
+        assert st.phase == "intermission"     # parked, not idle
+        # a queue add releases the hold automatically...
+        st.mutate(songs, lambda: st.queue.append(E(2, "Ann")))
+        flow.tick_once()
+        assert st.hold_remaining is None and st.deadline > time.time()
+        _force_deadline_past(st, songs)
+        flow.tick_once()                      # ...and the song plays
+        assert st.phase == "playing" and st.now["id"] == 2
+
+
+def test_manual_pause_wins_over_queue_add():
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(td / "state.json")
+        flow = Flow(st, songs, {"intermission_seconds": 5})
+        st.mutate(songs, lambda: (st.singers.append("Ann"),
+                                  st.queue.append(E(1, "Ann"))))
+        flow._begin_next()
+        flow.transport_cmd("pause")
+        flow.song_ended()
+        flow.tick_once()
+        assert st.hold_remaining is not None
+        # queueing must NOT resume a manually paused countdown
+        st.mutate(songs, lambda: st.queue.append(E(2, "Ann")))
+        flow.tick_once()
+        assert st.hold_remaining is not None
+        _force_deadline_past(st, songs)
+        flow.tick_once()
+        assert st.phase == "intermission"     # still parked
+        flow.transport_cmd("play")            # only Play releases it
+        flow.tick_once()
+        assert st.hold_remaining is None
+
+
+def test_start_now_overrides_hold():
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(td / "state.json")
+        flow = Flow(st, songs, {"intermission_seconds": 5,
+                                "start_now_countdown_seconds": 1})
+        st.mutate(songs, lambda: (st.singers.append("Ann"),
+                                  st.queue.extend([E(1, "Ann"), E(2, "Ann")])))
+        flow._begin_next()
+        flow.transport_cmd("pause")
+        flow.song_ended()
+        flow.tick_once()
+        assert st.hold_remaining is not None
+        flow.start_now()                      # explicit go beats the hold
+        assert st.phase == "countdown" and st.hold_remaining is None
+        _force_deadline_past(st, songs)
+        flow.tick_once()
+        assert st.phase == "playing"
 
 
 if __name__ == "__main__":

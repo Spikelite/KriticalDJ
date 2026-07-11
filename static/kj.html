@@ -232,7 +232,10 @@ function render(){
 setInterval(()=>{
   if(!STATE) return;
   const el = $("cd"); if(!el) return;
-  if(STATE.phase==="intermission" || STATE.phase==="countdown"){
+  if(STATE.held && STATE.phase==="intermission"){
+    // countdown parked: KJ pause, or nothing queued (resumes on queue add)
+    el.textContent = "⏸ " + Math.ceil(STATE.hold_remaining || 0) + "s";
+  } else if(STATE.phase==="intermission" || STATE.phase==="countdown"){
     const remain = Math.max(0, STATE.deadline - (Date.now()/1000 + clockOff));
     el.textContent = Math.ceil(remain)+"s";
   } else el.textContent = "";

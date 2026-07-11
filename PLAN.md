@@ -255,6 +255,16 @@ folder scan otherwise. Small task on each side (song-sorter: extend
       surfaces + read-only GETs stay public. `POST /api/kj/logout` + a Lock
       link on both operator pages. Validated: 23 unit tests + full curl auth
       flow + browser lock/unlock/relock.
+- [x] **Intermission hold** (UAT round 2): the countdown freezes while the
+      KJ has Pause down OR the queue is empty, and resumes from the frozen
+      remaining time. Manual pause always wins -- a queue add never resumes
+      a paused countdown; Play (or Start now) does. `State.hold_remaining`
+      (None = running; not journaled -- the tick loop re-establishes it),
+      transitions owned by `Flow.tick_once` (extracted from tick_forever so
+      the scheduler is unit-testable), snapshots carry `held` +
+      `hold_remaining`, both consoles show a parked `⏸ N`. `_begin_next` /
+      `start_now` / reset clear the hold. 4 new tests (28 total) + live
+      smoke of every scenario incl. pause-wins-over-queue-add.
 
 ## Notes for future sessions
 
