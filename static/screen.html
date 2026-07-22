@@ -145,9 +145,12 @@ async function loadSong(entry) {
   const tm = document.createElement("span");
   tm.id = "ptimer";
   $("playhdr").appendChild(tm);
-  audio.src = "/media/" + entry.song_id + "/mp3";
+  // a queue entry may pin its own version (e.g. a saved-list duet); pass it so
+  // media resolves to that copy instead of the KJ's global pick
+  const vq = entry.ver != null ? "?v=" + entry.ver : "";
+  audio.src = "/media/" + entry.song_id + "/mp3" + vq;
   try {
-    const r = await fetch("/media/" + entry.song_id + "/cdg");
+    const r = await fetch("/media/" + entry.song_id + "/cdg" + vq);
     if (!r.ok) throw new Error("no cdg");
     cdg = new CDGraphics(await r.arrayBuffer());
     cdgReady = true;

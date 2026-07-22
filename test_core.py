@@ -354,6 +354,25 @@ def test_snapshot_shows_selected_version():
         assert "vsel" not in st.snapshot(songs)["upcoming"][0]
 
 
+def test_entry_version_override_in_snapshot():
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        st = State(td / "s.json")
+        st.versions = VersionStore(td / "versions.json")
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t",
+                       "versions": [{"label": "Best"}, {"label": "Duet"}]}}
+        st.mutate(songs, lambda: (st.singers.append("Ann"),
+                  st.queue.extend([{"id": 1, "singer": "Ann", "song_id": "x", "version": 0},
+                                   {"id": 2, "singer": "Ann", "song_id": "x"}])))
+        rows = {r["id"]: r for r in st.snapshot(songs)["upcoming"]}
+        assert rows[1]["vsel"] == 1 and rows[1]["ver"] == 0    # explicit override to v1
+        assert rows[2]["vsel"] == 1 and "ver" not in rows[2]   # no override -> global default
+        st.versions.set("x", 1)                                # KJ moves the GLOBAL pick to v2
+        rows = {r["id"]: r for r in st.snapshot(songs)["upcoming"]}
+        assert rows[2]["vsel"] == 2                            # non-override follows the global
+        assert rows[1]["vsel"] == 1 and rows[1]["ver"] == 0   # override is independent, stays v1
+
+
 def test_validate_config_kj_pin():
     cfg = {"kj_pin": "0000"}
     # a blank PIN field means "keep current" -- not a change, not an error

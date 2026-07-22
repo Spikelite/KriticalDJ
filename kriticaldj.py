@@ -650,10 +650,13 @@ class State:
                    "artist": s.get("artist", "?"), "title": s.get("title", "?"),
                    "duration": s.get("duration"), "nversions": nv}
             if nv > 1 and self.versions is not None:
-                idx = self.versions.get(e["song_id"])
-                # 1-based for display (v1 = best); out-of-range picks fall back
-                # to the default, mirroring _media_path
-                row["vsel"] = (idx if 0 <= idx < nv else 0) + 1
+                # a per-entry override wins over the KJ's global pick
+                ev = e.get("version")
+                idx = ev if ev is not None else self.versions.get(e["song_id"])
+                idx = idx if isinstance(idx, int) and 0 <= idx < nv else 0
+                row["vsel"] = idx + 1  # 1-based for display (v1 = best)
+                if ev is not None:
+                    row["ver"] = idx   # 0-based; the screen requests ?v=this
             return row
         with self.lock:
             up = self.rotation_preview()
@@ -922,16 +925,17 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 return None
 
         # ---- media -------------------------------------------------------
-        def _media_path(self, song_id: str, kind: str) -> Path | None:
+        def _media_path(self, song_id: str, kind: str, ver=None) -> Path | None:
             s = songs.get(song_id)
             if not s or kind not in ("mp3", "cdg"):
                 return None
-            # Resolve the active version. Version 0 reads the primary keys off
-            # the song dict itself (identical to the pre-multi-version path);
-            # an alternate reads from its own media dict with a per-version
-            # cache key so extractions never collide.
+            # Resolve the active version. An explicit `ver` (a queue entry's
+            # per-entry override) wins; otherwise the KJ's global pick. Version 0
+            # reads the primary keys off the song dict itself (identical to the
+            # pre-multi-version path); an alternate reads from its own media dict
+            # with a per-version cache key so extractions never collide.
             vlist = s.get("versions") or []
-            idx = versions.get(song_id)
+            idx = ver if ver is not None else versions.get(song_id)
             if 0 < idx < len(vlist):
                 v, cache_key = vlist[idx], f"{song_id}.v{idx}"
             else:
@@ -1139,7 +1143,12 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                                     "title": s["title"], "duration": s.get("duration")})
                 return self._json({"total": total, "songs": out})
             if len(parts) == 3 and parts[0] == "media":
-                p = self._media_path(parts[1], parts[2])
+                vq = parse_qs(u.query).get("v", [None])[0]  # per-entry version
+                try:
+                    ver = int(vq) if vq is not None else None
+                except ValueError:
+                    ver = None
+                p = self._media_path(parts[1], parts[2], ver)
                 if p and p.exists():
                     ctype = "audio/mpeg" if parts[2] == "mp3" else "application/octet-stream"
                     return self._serve_file(p, ctype)
@@ -1193,11 +1202,19 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 if sid not in songs or not raw:
                     return self._json({"error": "song_id and singer required"}, 400)
                 singer, _ = registry.resolve(raw)
+                # optional per-entry version override (e.g. a saved-list duet
+                # pick); ignored unless it's a valid index for this song
+                ver = self._int_arg(body, "version")
+                nv = len(songs[sid].get("versions") or [])
+                override = ver if (ver is not None and 0 <= ver < nv) else None
 
                 def fn():
                     state.add_singer(singer, cfg)
-                    state.queue.append({"id": state.next_entry_id,
-                                        "singer": singer, "song_id": sid})
+                    entry = {"id": state.next_entry_id, "singer": singer,
+                             "song_id": sid}
+                    if override is not None:
+                        entry["version"] = override
+                    state.queue.append(entry)
                     state.next_entry_id += 1
                 state.mutate(songs, fn)
                 stats.log("queued", singer, flow._info(sid))
