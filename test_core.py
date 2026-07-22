@@ -7,8 +7,8 @@ from pathlib import Path
 
 from kriticaldj import (Flow, ListStore, SingerRegistry, State, Stats,
                         VersionStore, locked_count, move_entry, move_singer,
-                        parse_title, pick_next, random_song, scan_library,
-                        validate_config_changes)
+                        parse_title, pick_next, random_pool_track, random_song,
+                        scan_library, validate_config_changes)
 
 E = lambda i, s: {"id": i, "singer": s, "song_id": "x"}
 
@@ -371,6 +371,30 @@ def test_entry_version_override_in_snapshot():
         rows = {r["id"]: r for r in st.snapshot(songs)["upcoming"]}
         assert rows[2]["vsel"] == 2                            # non-override follows the global
         assert rows[1]["vsel"] == 1 and rows[1]["ver"] == 0   # override is independent, stays v1
+
+
+def test_random_pool_track():
+    songs = {"a": {}, "b": {}, "c": {}}
+    tracks = [{"song_id": "a"}, {"song_id": "b", "version": 1}, {"song_id": "gone"}]
+    # 'gone' isn't in the library (skipped); 'a' excluded -> only 'b' is eligible
+    for _ in range(20):
+        assert random_pool_track(tracks, songs, {"a"})["song_id"] == "b"
+    # all eligible excluded -> fall back to any in-library track
+    assert random_pool_track(tracks, songs, {"a", "b"})["song_id"] in ("a", "b")
+    # a picked track keeps its version override
+    assert random_pool_track([{"song_id": "b", "version": 1}], songs, set())["version"] == 1
+    assert random_pool_track([], songs, set()) is None
+    assert random_pool_track([{"song_id": "gone"}], songs, set()) is None  # none in library
+
+
+def test_snapshot_kj_random_flag():
+    with tempfile.TemporaryDirectory() as td:
+        st = State(Path(td) / "s.json")
+        assert "kj_random" not in st.snapshot({})   # no fn attached -> absent
+        st.kj_random_fn = lambda: True
+        assert st.snapshot({})["kj_random"] is True
+        st.kj_random_fn = lambda: False
+        assert st.snapshot({})["kj_random"] is False
 
 
 def test_list_store_crud_and_persistence():

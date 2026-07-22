@@ -552,6 +552,15 @@ def locked_count(num_singers: int, lock_percent: int) -> int:
     return max(1, min(round(lock_percent / 100 * num_singers), num_singers))
 
 
+def random_pool_track(tracks: list, songs: dict, exclude: set):
+    """Pick a random track from a KJ pool list whose song is in the library and
+    not already queued; fall back to any in-library track. Returns the track
+    dict (song_id + optional version) or None."""
+    valid = [t for t in tracks if t.get("song_id") in songs]
+    cands = [t for t in valid if t["song_id"] not in exclude] or valid
+    return random.choice(cands) if cands else None
+
+
 class State:
     """All mutable party state, guarded by one lock, journaled to disk."""
 
@@ -569,6 +578,8 @@ class State:
         self.transport = {"cmd": "play", "seq": 0}
         self.versions = None             # VersionStore, attached in main();
                                          # snapshots show each song's active pick
+        self.kj_random_fn = None         # callable -> bool: is a Random-KJ pool
+                                         # available? attached in make_handler
         self.next_entry_id = 1
         # The locked "up next" slot: entry id, or None. Once someone is
         # projected next they stay next -- people plan around it (see UAT).
@@ -778,6 +789,8 @@ class State:
                 "held": self.hold_remaining is not None,
                 "hold_remaining": self.hold_remaining,
             }
+            if self.kj_random_fn is not None:
+                out["kj_random"] = self.kj_random_fn()  # is a KJ pool available?
             out.update(self.extra)
             return out
 
@@ -975,6 +988,12 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
     # this just keeps guests off the console, not a hardened auth system.
     sessions: set = set()
     sess_lock = threading.Lock()
+    # live "is a Random-KJ pool available?" flag, surfaced in every snapshot so
+    # the songbook button can enable/disable itself
+    state.kj_random_fn = lambda: bool(
+        lists.default_random and lists.default_random in lists.lists
+        and any(t.get("song_id") in songs
+                for t in lists.lists[lists.default_random].get("tracks", [])))
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -1403,6 +1422,46 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 return self._json({"ok": True, "song_id": sid,
                                    "artist": s.get("artist", "?"),
                                    "title": s.get("title", "?")})
+            if u.path == "/api/queue/random_kj":
+                # like Random Song, but draws from the KJ's designated pool list
+                # and honors each track's per-list version override
+                raw = (body.get("singer") or "").strip()[:40]
+                if not raw:
+                    return self._json({"error": "singer required"}, 400)
+                dr = lists.default_random
+                pool = lists.lists.get(dr) if dr else None
+                if not pool or not pool.get("tracks"):
+                    return self._json({"error": "no KJ pool set"}, 400)
+                singer, _ = registry.resolve(raw)
+                picked = []
+
+                def fn():
+                    exclude = {e["song_id"] for e in state.queue}
+                    if state.now:
+                        exclude.add(state.now["song_id"])
+                    t = random_pool_track(pool["tracks"], songs, exclude)
+                    if t is None:
+                        return
+                    sid = t["song_id"]
+                    state.add_singer(singer, cfg)
+                    entry = {"id": state.next_entry_id, "singer": singer,
+                             "song_id": sid}
+                    v = t.get("version")
+                    nv = len(songs[sid].get("versions") or [])
+                    if v is not None and 0 <= v < nv:
+                        entry["version"] = v
+                    state.queue.append(entry)
+                    state.next_entry_id += 1
+                    picked.append(sid)
+                state.mutate(songs, fn)
+                if not picked:
+                    return self._json({"error": "no songs available"}, 400)
+                sid = picked[0]
+                stats.log("queued", singer, flow._info(sid))
+                s = songs.get(sid, {})
+                return self._json({"ok": True, "song_id": sid,
+                                   "artist": s.get("artist", "?"),
+                                   "title": s.get("title", "?")})
             if u.path == "/api/lists":  # create a new saved list
                 raw = (body.get("singer") or "").strip()[:40]
                 name = (body.get("name") or "").strip()[:60]
@@ -1642,7 +1701,9 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
             if u.path == "/api/kj/list/default":
                 # tag (or clear, with a null/blank id) the Random-KJ pool list
                 lid = body.get("list_id") or None
-                return self._json({"ok": lists.set_default_random(lid),
+                ok = lists.set_default_random(lid)
+                state.mutate(songs, lambda: None)  # push new availability live
+                return self._json({"ok": ok,
                                    "default_random": lists.default_random})
             if u.path.startswith("/api/kj/list/"):
                 lp = [p for p in u.path.split("/") if p]  # api kj list <id> <action>

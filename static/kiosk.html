@@ -77,7 +77,7 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 </div>
 <div class="filters" id="filters"><button data-f="all" class="on">All</button><button data-f="artist">Artist</button><button data-f="title">Song title</button></div>
 <div class="alpha" id="alpha"></div>
-<div class="lucky"><button id="randbtn" type="button">&#127922; Random song</button></div>
+<div class="lucky"><button id="randbtn" type="button">&#127922; Random song</button><button id="kjrandbtn" type="button" disabled>&#127911; KJ pick</button></div>
 </header>
 <section id="upwrap" style="display:none"><h2>Now &amp; next</h2><div id="upcoming"></div></section>
 <section><h2 id="reshead">Songs</h2><div id="meta"></div><div id="results"></div></section>
@@ -137,6 +137,7 @@ function songRow(s){
 
 function renderState(){
   renderNames();
+  if($("kjrandbtn")) $("kjrandbtn").disabled = !(STATE && STATE.kj_random);
   if(!STATE) return;
   // shared now/next banner -- no personal position, this is everyone's device
   const n=$("now"); n.textContent="";
@@ -226,6 +227,14 @@ function queueRandom(){
     .then(r=>r.json()).then(d=>{ d.ok ? afterQueue("🎲 "+d.title+" for "+who+" ✓") : toast("Couldn't pick a song"); });
 }
 $("randbtn").onclick=queueRandom;
+function queueKJRandom(){
+  if(needName()) return;
+  const who=ME;
+  fetch("/api/queue/random_kj",{method:"POST",body:JSON.stringify({singer:who})})
+    .then(r=>r.json()).then(d=>{ d.ok ? afterQueue("🎧 "+d.title+" for "+who+" ✓")
+      : toast(d.error==="no KJ pool set" ? "KJ hasn't set up picks yet" : "Couldn't pick a song"); });
+}
+$("kjrandbtn").onclick=queueKJRandom;
 
 const es=new EventSource("/events");
 es.onmessage=e=>{ STATE=JSON.parse(e.data); renderState(); };
