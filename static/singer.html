@@ -36,6 +36,10 @@ h1{font-size:18px;margin:0 0 4px}
 .alpha{display:flex;gap:3px;margin-top:8px;flex-wrap:wrap}
 .alpha button{flex:1;min-width:26px;font-size:12px;padding:5px 0;border-radius:6px;border:1px solid #3a3f47;background:var(--bg);color:var(--dim);cursor:pointer}
 .alpha button.on{background:var(--accent);color:#00222f;border-color:var(--accent);font-weight:700}
+.lucky{display:flex;gap:8px;margin-top:8px}
+.lucky button{font-size:14px;padding:8px 14px;border-radius:999px;border:1px solid var(--accent);background:var(--bg);color:var(--accent);cursor:pointer;font-weight:600}
+.lucky button:disabled{opacity:.45;border-color:#3a3f47;color:var(--dim);cursor:not-allowed}
+.lucky button:active{background:#0e2630}
 section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;padding:12px 14px 4px;margin:0}
 .row{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);cursor:pointer}
 .row .t{flex:1;min-width:0}
@@ -69,6 +73,7 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 </div>
 <div class="filters" id="filters"><button data-f="all" class="on">All</button><button data-f="artist">Artist</button><button data-f="title">Song title</button></div>
 <div class="alpha" id="alpha"></div>
+<div class="lucky"><button id="randbtn" type="button">&#127922; Random song</button></div>
 </header>
 <section id="minewrap" style="display:none"><h2>My songs</h2><div id="mine"></div></section>
 <section><h2 id="reshead">Songs</h2><div id="meta"></div><div id="results"></div></section>
@@ -218,6 +223,14 @@ function queueSong(s){
   fetch("/api/queue",{method:"POST",body:JSON.stringify({song_id:s.song_id,singer:ME})})
     .then(r=>r.json()).then(d=>{ if(d.ok) toast("Queued for "+ME+" ✓"); else toast("Hmm, that didn't work"); });
 }
+// "Surprise me": the server picks a random library song (skipping anything
+// already queued or on stage) and queues it for the current singer.
+function queueRandom(){
+  if(!ME){ toast("Pick your name first (top of screen)"); window.scrollTo({top:0,behavior:"smooth"}); return; }
+  fetch("/api/queue/random",{method:"POST",body:JSON.stringify({singer:ME})})
+    .then(r=>r.json()).then(d=>{ d.ok ? toast("🎲 "+d.title+" — queued for "+ME) : toast("Couldn't pick a song"); });
+}
+$("randbtn").onclick=queueRandom;
 
 const es=new EventSource("/events");
 es.onmessage=e=>{ STATE=JSON.parse(e.data); renderState(); };

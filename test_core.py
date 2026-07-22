@@ -7,7 +7,7 @@ from pathlib import Path
 
 from kriticaldj import (Flow, SingerRegistry, State, Stats, VersionStore,
                         move_entry, move_singer, parse_title, pick_next,
-                        scan_library, validate_config_changes)
+                        random_song, scan_library, validate_config_changes)
 
 E = lambda i, s: {"id": i, "singer": s, "song_id": "x"}
 
@@ -514,6 +514,19 @@ def test_start_now_overrides_hold():
         _force_deadline_past(st, songs)
         flow.tick_once()
         assert st.phase == "playing"
+
+
+def test_random_song_excludes_and_falls_back():
+    songs = {"a": {}, "b": {}, "c": {}}
+    # one candidate left -> deterministic
+    assert random_song(songs, {"a", "b"}) == "c"
+    # excluding everything falls back to the whole library (never dead-ends)
+    assert random_song(songs, {"a", "b", "c"}) in songs
+    # empty library -> None
+    assert random_song({}, set()) is None
+    # a normal pick is always a real, non-excluded id
+    for _ in range(20):
+        assert random_song(songs, {"a"}) in ("b", "c")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import socket
 import sys
@@ -417,6 +418,16 @@ def move_singer(singers: list, name: str, direction: int) -> bool:
         return False
     singers[i], singers[j] = singers[j], singers[i]
     return True
+
+
+def random_song(songs: dict, exclude: set) -> str | None:
+    """Uniform-random song id not in `exclude` (song ids already queued or on
+    stage). Falls back to the full library if excluding everything would leave
+    nothing, so the button never dead-ends on a small/fully-queued library."""
+    pool = [sid for sid in songs if sid not in exclude]
+    if not pool:
+        pool = list(songs)
+    return random.choice(pool) if pool else None
 
 
 class State:
@@ -1078,6 +1089,38 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 state.mutate(songs, fn)
                 stats.log("queued", singer, flow._info(sid))
                 return self._json({"ok": True})
+            if u.path == "/api/queue/random":
+                # songbook "surprise me": queue a random library song for the
+                # singer, skipping anything already queued or on stage so nobody
+                # gets a duplicate of what's already lined up.
+                raw = (body.get("singer") or "").strip()[:40]
+                if not raw:
+                    return self._json({"error": "singer required"}, 400)
+                singer, _ = registry.resolve(raw)
+                picked = []
+
+                def fn():
+                    exclude = {e["song_id"] for e in state.queue}
+                    if state.now:
+                        exclude.add(state.now["song_id"])
+                    sid = random_song(songs, exclude)
+                    if sid is None:
+                        return
+                    if singer not in state.singers:
+                        state.singers.append(singer)
+                    state.queue.append({"id": state.next_entry_id,
+                                        "singer": singer, "song_id": sid})
+                    state.next_entry_id += 1
+                    picked.append(sid)
+                state.mutate(songs, fn)
+                if not picked:
+                    return self._json({"error": "no songs available"}, 400)
+                sid = picked[0]
+                stats.log("queued", singer, flow._info(sid))
+                s = songs.get(sid, {})
+                return self._json({"ok": True, "song_id": sid,
+                                   "artist": s.get("artist", "?"),
+                                   "title": s.get("title", "?")})
             if u.path == "/api/screen/ended":
                 flow.song_ended()
                 return self._json({"ok": True})
