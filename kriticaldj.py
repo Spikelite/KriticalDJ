@@ -1149,6 +1149,10 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
             parts = [p for p in u.path.split("/") if p]
             if u.path == "/":
                 return self._page("singer.html", "Singer")
+            if u.path == "/kj/lists":  # operator list-moderation surface
+                if not self._authed():
+                    return self._page("kjlogin.html", "Locked")
+                return self._page("kjlists.html", "Lists")
             if u.path in ("/kj", "/setup"):
                 # operator surfaces: show the PIN gate until a valid session
                 if not self._authed():
@@ -1252,6 +1256,27 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                                 "created": l.get("created", 0), "tracks": tracks})
                 out.sort(key=lambda x: x["created"])
                 return self._json({"lists": out})
+            if u.path == "/api/kj/lists":  # moderation view: everyone's lists
+                if not self._authed():
+                    return self._json({"error": "auth required"}, 401)
+                out = []
+                for lid, l in lists.lists.items():
+                    tracks = []
+                    for t in l.get("tracks", []):
+                        s = songs.get(t.get("song_id"), {})
+                        row = {"artist": s.get("artist", "?"),
+                               "title": s.get("title", "?")}
+                        if "version" in t:
+                            vlist = s.get("versions") or []
+                            row["version"] = t["version"]
+                            if 0 <= t["version"] < len(vlist):
+                                row["version_label"] = vlist[t["version"]].get("label", "")
+                        tracks.append(row)
+                    out.append({"id": lid, "name": l.get("name", ""),
+                                "owner_name": l.get("owner_name", ""),
+                                "created": l.get("created", 0), "tracks": tracks})
+                out.sort(key=lambda x: (x["owner_name"].lower(), x["created"]))
+                return self._json({"default_random": lists.default_random, "lists": out})
             if u.path == "/api/songs":
                 qs = parse_qs(u.query)
                 toks = _searchable(" ".join(qs.get("q", [""]))).split()
@@ -1614,6 +1639,24 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 # nudge the surfaces so a version swap shows up live
                 state.mutate(songs, lambda: None)
                 return self._json({"ok": True, "song_id": sid, "active": idx})
+            if u.path == "/api/kj/list/default":
+                # tag (or clear, with a null/blank id) the Random-KJ pool list
+                lid = body.get("list_id") or None
+                return self._json({"ok": lists.set_default_random(lid),
+                                   "default_random": lists.default_random})
+            if u.path.startswith("/api/kj/list/"):
+                lp = [p for p in u.path.split("/") if p]  # api kj list <id> <action>
+                if len(lp) != 5:
+                    return self._json({"error": "not found"}, 404)
+                lid, action = lp[3], lp[4]
+                if action == "delete":  # KJ override: delete anyone's list
+                    return self._json({"ok": lists.delete(lid)})
+                if action == "rename":
+                    nm = (body.get("name") or "").strip()[:60]
+                    if not nm:
+                        return self._json({"error": "name required"}, 400)
+                    return self._json({"ok": lists.rename(lid, nm)})
+                return self._json({"error": "unknown action"}, 400)
             if u.path.startswith("/api/kj/"):
                 cmd = u.path.rsplit("/", 1)[1]
                 if cmd in ("play", "pause"):
