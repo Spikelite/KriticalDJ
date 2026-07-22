@@ -6,8 +6,9 @@ import zipfile
 from pathlib import Path
 
 from kriticaldj import (Flow, SingerRegistry, State, Stats, VersionStore,
-                        move_entry, move_singer, parse_title, pick_next,
-                        random_song, scan_library, validate_config_changes)
+                        locked_count, move_entry, move_singer, parse_title,
+                        pick_next, random_song, scan_library,
+                        validate_config_changes)
 
 E = lambda i, s: {"id": i, "singer": s, "song_id": "x"}
 
@@ -514,6 +515,94 @@ def test_start_now_overrides_hold():
         _force_deadline_past(st, songs)
         flow.tick_once()
         assert st.phase == "playing"
+
+
+FAIR = {"fairness_enabled": True, "lock_percent": 33, "bump_limit": 2}
+
+
+def test_locked_count():
+    assert locked_count(6, 33) == 2     # round(1.98)
+    assert locked_count(3, 33) == 1     # round(0.99)
+    assert locked_count(2, 33) == 1     # round(0.66) -> 1
+    assert locked_count(10, 0) == 1     # floor: always protect the up-next slot
+    assert locked_count(5, 100) == 5    # everyone locked
+    assert locked_count(0, 33) == 0     # nobody
+
+
+def test_add_singer_fairness_off_appends():
+    with tempfile.TemporaryDirectory() as td:
+        st = State(Path(td) / "s.json")
+        st.singers = ["A", "B", "C"]
+        st.add_singer("D", {"fairness_enabled": False})
+        assert st.singers == ["A", "B", "C", "D"]
+
+
+def test_add_singer_newbie_jumps_veterans_below_lock():
+    with tempfile.TemporaryDirectory() as td:
+        st = State(Path(td) / "s.json")
+        st.singers = ["A", "B", "C", "D", "E", "F"]
+        st.performed = ["A", "B", "C", "D", "E", "F"]   # all veterans
+        st.add_singer("X", FAIR)                         # newcomer (newbie)
+        # lock 33% of 6 = 2 -> A,B protected; X lands right below them
+        assert st.singers == ["A", "B", "X", "C", "D", "E", "F"]
+        assert st.bumps == {"C": 1, "D": 1, "E": 1, "F": 1}  # each jumped vet
+
+
+def test_add_singer_newbie_never_bumps_newbie():
+    with tempfile.TemporaryDirectory() as td:
+        st = State(Path(td) / "s.json")
+        st.singers = ["N1", "N2", "V"]      # two waiting newbies, one veteran
+        st.performed = ["V"]
+        st.add_singer("X", FAIR)            # newbie
+        # lock=1 (N1). X goes AFTER waiting newbie N2, ahead of veteran V
+        assert st.singers == ["N1", "N2", "X", "V"]
+        assert st.bumps == {"V": 1}
+
+
+def test_add_singer_bump_cap_protects_veteran():
+    with tempfile.TemporaryDirectory() as td:
+        st = State(Path(td) / "s.json")
+        st.singers = ["A", "V"]
+        st.performed = ["A", "V"]
+        st.bumps = {"V": 2}                 # V already at the cap
+        st.add_singer("X", FAIR)           # newbie
+        assert st.singers == ["A", "V", "X"]   # V protected -> X lands behind it
+        assert st.bumps == {"V": 2}            # no further bump
+
+
+def test_add_singer_veteran_rejoin_appends():
+    with tempfile.TemporaryDirectory() as td:
+        st = State(Path(td) / "s.json")
+        st.singers = ["A", "B"]
+        st.performed = ["A", "B", "V"]      # V sang, then was kicked; now rejoining
+        st.add_singer("V", FAIR)
+        assert st.singers == ["A", "B", "V"]   # no newbie boost for a veteran
+        assert st.bumps == {}
+
+
+def test_performed_and_bump_reset_on_turn():
+    with tempfile.TemporaryDirectory() as td:
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(Path(td) / "s.json")
+        flow = Flow(st, songs, {"intermission_seconds": 1})
+        st.mutate(songs, lambda: (st.singers.append("Ann"),
+                                  st.queue.append(E(1, "Ann"))))
+        st.mutate(songs, lambda: st.bumps.__setitem__("Ann", 1))  # pretend bumped
+        flow._begin_next()                  # Ann takes her turn
+        assert "Ann" in st.performed        # veteran this session now
+        assert "Ann" not in st.bumps        # counter reset on her turn
+
+
+def test_validate_config_bool_and_fairness():
+    cfg = {"fairness_enabled": True, "lock_percent": 33, "bump_limit": 2}
+    ch, err, _ = validate_config_changes(cfg, {"fairness_enabled": False})
+    assert ch == {"fairness_enabled": False} and not err
+    ch, err, _ = validate_config_changes(cfg, {"fairness_enabled": "on"})
+    assert ch == {} and not err         # "on" == True == current -> no change
+    ch, _, _ = validate_config_changes(cfg, {"lock_percent": "150"})
+    assert ch["lock_percent"] == 100    # clamped to range
+    ch, _, _ = validate_config_changes(cfg, {"bump_limit": "-5"})
+    assert ch["bump_limit"] == 0
 
 
 def test_manual_order_nudge_and_stickiness():

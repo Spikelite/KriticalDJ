@@ -43,6 +43,13 @@ DEFAULT_CONFIG = {
     # 4-digit gate for the operator surfaces (/kj, /setup). Change it from the
     # setup screen; default is deliberately obvious so first boot isn't locked.
     "kj_pin": "0000",
+    # Fair queue (UAT round 3): lock the top lock_percent of singers so
+    # newcomers can't bump them. A newcomer who hasn't sung this session slots
+    # in ahead of bumpable veterans but behind waiting newbies; a waiting
+    # veteran can be jumped at most bump_limit times before being protected too.
+    "fairness_enabled": True,
+    "lock_percent": 33,
+    "bump_limit": 2,
 }
 
 
@@ -69,10 +76,12 @@ _CONFIG_FIELDS = {
     "host": "str", "port": "int", "intermission_seconds": "int",
     "start_now_countdown_seconds": "int", "lyrics_offset_ms": "int",
     "kj_pin": "pin",
+    "fairness_enabled": "bool", "lock_percent": "int", "bump_limit": "int",
 }
 _CONFIG_LIMITS = {"port": (1, 65535), "intermission_seconds": (3, 600),
                   "start_now_countdown_seconds": (0, 30),
-                  "lyrics_offset_ms": (-2000, 2000)}
+                  "lyrics_offset_ms": (-2000, 2000),
+                  "lock_percent": (0, 100), "bump_limit": (0, 50)}
 _RESTART_KEYS = {"host", "port"}  # rebinding the socket can't happen live
 
 
@@ -103,6 +112,9 @@ def validate_config_changes(cfg: dict, body: dict):
             if not (val.isdigit() and len(val) == 4):
                 errors.append("KJ PIN must be exactly 4 digits")
                 continue
+        elif kind == "bool":
+            val = (val.strip().lower() in ("1", "true", "on", "yes")
+                   if isinstance(val, str) else bool(val))
         else:
             if not isinstance(val, str):
                 errors.append(f"{key} must be text")
@@ -430,6 +442,15 @@ def random_song(songs: dict, exclude: set) -> str | None:
     return random.choice(pool) if pool else None
 
 
+def locked_count(num_singers: int, lock_percent: int) -> int:
+    """How many singers at the top of the rotation are locked against being
+    bumped by newcomers: round(lock_percent% of the count), but always at least
+    the up-next slot, and never more than everyone."""
+    if num_singers <= 0:
+        return 0
+    return max(1, min(round(lock_percent / 100 * num_singers), num_singers))
+
+
 class State:
     """All mutable party state, guarded by one lock, journaled to disk."""
 
@@ -457,6 +478,12 @@ class State:
         # touching singer rotation or per-singer FIFO; drained as entries play
         # or leave the queue. See move_in_order / rotation_preview.
         self.manual_order: list[int] = []
+        # Fair-queue bookkeeping (this session): singers who have started a song
+        # (veterans -- everyone else is a "newbie" due a first-song boost), and
+        # how many times each waiting veteran has been bumped by newcomers. Both
+        # reset when a singer takes their turn, and on session reset.
+        self.performed: list[str] = []
+        self.bumps: dict[str, int] = {}
         # Intermission hold: seconds left on a FROZEN countdown, or None when
         # it is running. Set while the KJ has Pause down or the queue is
         # empty; the tick loop owns the transitions (see Flow.tick_once).
@@ -472,7 +499,8 @@ class State:
         except (ValueError, OSError):
             return
         for k in ("singers", "queue", "cursor", "now", "phase", "deadline",
-                  "transport", "next_entry_id", "pinned", "manual_order"):
+                  "transport", "next_entry_id", "pinned", "manual_order",
+                  "performed", "bumps"):
             if k in d:
                 setattr(self, k, d[k])
         # A power failure mid-song resumes at the intermission board rather
@@ -488,7 +516,8 @@ class State:
     def _save(self) -> None:
         d = {k: getattr(self, k) for k in
              ("singers", "queue", "cursor", "now", "phase", "deadline",
-              "transport", "next_entry_id", "pinned", "manual_order")}
+              "transport", "next_entry_id", "pinned", "manual_order",
+              "performed", "bumps")}
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(d, indent=1), encoding="utf-8")
         os.replace(tmp, self.path)
@@ -576,6 +605,43 @@ class State:
         self.manual_order = order[:max(i, j) + 1]
         return True
 
+    def add_singer(self, name: str, cfg: dict) -> bool:
+        """Add a singer to the rotation. Returns True if newly added. With the
+        fair queue on, a NEWCOMER who hasn't sung this session slots in below the
+        locked top zone, ahead of bumpable veterans but behind waiting newbies
+        and anyone protected (locked or bump-capped). Veterans re-joining and the
+        fairness-off path just append. Bumped veterans' counts tick up here."""
+        if name in self.singers:
+            return False
+        newbie = name not in self.performed
+        if not cfg.get("fairness_enabled", True) or not self.singers or not newbie:
+            self.singers.append(name)
+            return True
+        # canonicalize so the rotation reads from index 0 -- lets us reason about
+        # positions as a plain list, no cursor wrap-around
+        line = self.singers[self.cursor:] + self.singers[:self.cursor]
+        self.cursor = 0
+        lock_n = locked_count(len(line), cfg.get("lock_percent", 33))
+        limit = cfg.get("bump_limit", 2)
+        performed = set(self.performed)
+        # highest slot the newcomer may take: after the locked zone, and after
+        # every waiting newbie or bump-capped veteran (barriers they must not
+        # jump); bumpable veterans are not barriers.
+        p = lock_n
+        for i in range(lock_n, len(line)):
+            s = line[i]
+            capped = s in performed and self.bumps.get(s, 0) >= limit
+            if s not in performed or capped:      # newbie or protected veteran
+                p = i + 1
+        # every bumpable veteran at or below the insertion slot is pushed down
+        for i in range(p, len(line)):
+            s = line[i]
+            if s in performed and self.bumps.get(s, 0) < limit:
+                self.bumps[s] = self.bumps.get(s, 0) + 1
+        line.insert(p, name)
+        self.singers = line
+        return True
+
     def snapshot(self, songs: dict) -> dict:
         def song_view(e):
             s = songs.get(e["song_id"], {})
@@ -603,6 +669,8 @@ class State:
                 "transport": dict(self.transport),
                 "pinned": self.pinned,
                 "manual_order": list(self.manual_order),
+                "performed": list(self.performed),
+                "bumps": dict(self.bumps),
                 "held": self.hold_remaining is not None,
                 "hold_remaining": self.hold_remaining,
             }
@@ -641,6 +709,9 @@ class Flow:
             st.queue.remove(e)
             st.pinned = None  # consumed; mutate() re-pins the new next
             st.now = e
+            if e["singer"] not in st.performed:  # they've now sung this session
+                st.performed.append(e["singer"])
+            st.bumps.pop(e["singer"], None)      # fresh start for their next wait
             st.phase = "playing"
             st.hold_remaining = None
             st.transport = {"cmd": "play", "seq": st.transport["seq"] + 1}
@@ -1006,7 +1077,10 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                                    "port": cfg["port"],
                                    "intermission_seconds": cfg["intermission_seconds"],
                                    "start_now_countdown_seconds": cfg["start_now_countdown_seconds"],
-                                   "lyrics_offset_ms": cfg["lyrics_offset_ms"]})
+                                   "lyrics_offset_ms": cfg["lyrics_offset_ms"],
+                                   "fairness_enabled": cfg.get("fairness_enabled", True),
+                                   "lock_percent": cfg.get("lock_percent", 33),
+                                   "bump_limit": cfg.get("bump_limit", 2)})
             if u.path == "/api/stats/summary":
                 played, queued, singers_c = Counter(), Counter(), Counter()
                 events = resets = 0
@@ -1110,8 +1184,7 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 name, _sid = registry.resolve(raw)  # canonical casing, stable id
 
                 def fn():
-                    if name not in state.singers:
-                        state.singers.append(name)
+                    state.add_singer(name, cfg)
                 state.mutate(songs, fn)
                 return self._json({"ok": True, "name": name, "singers": state.singers})
             if u.path == "/api/queue":
@@ -1122,8 +1195,7 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 singer, _ = registry.resolve(raw)
 
                 def fn():
-                    if singer not in state.singers:
-                        state.singers.append(singer)
+                    state.add_singer(singer, cfg)
                     state.queue.append({"id": state.next_entry_id,
                                         "singer": singer, "song_id": sid})
                     state.next_entry_id += 1
@@ -1147,8 +1219,7 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                     sid = random_song(songs, exclude)
                     if sid is None:
                         return
-                    if singer not in state.singers:
-                        state.singers.append(singer)
+                    state.add_singer(singer, cfg)
                     state.queue.append({"id": state.next_entry_id,
                                         "singer": singer, "song_id": sid})
                     state.next_entry_id += 1
@@ -1238,6 +1309,8 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                     state.now = None
                     state.pinned = None
                     state.manual_order = []
+                    state.performed = []
+                    state.bumps = {}
                     state.phase = "idle"
                     state.deadline = 0.0
                     state.hold_remaining = None
