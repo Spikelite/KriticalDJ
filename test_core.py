@@ -5,9 +5,9 @@ import time
 import zipfile
 from pathlib import Path
 
-from kriticaldj import (Flow, SingerRegistry, State, Stats, VersionStore,
-                        locked_count, move_entry, move_singer, parse_title,
-                        pick_next, random_song, scan_library,
+from kriticaldj import (Flow, ListStore, SingerRegistry, State, Stats,
+                        VersionStore, locked_count, move_entry, move_singer,
+                        parse_title, pick_next, random_song, scan_library,
                         validate_config_changes)
 
 E = lambda i, s: {"id": i, "singer": s, "song_id": "x"}
@@ -371,6 +371,44 @@ def test_entry_version_override_in_snapshot():
         rows = {r["id"]: r for r in st.snapshot(songs)["upcoming"]}
         assert rows[2]["vsel"] == 2                            # non-override follows the global
         assert rows[1]["vsel"] == 1 and rows[1]["ver"] == 0   # override is independent, stays v1
+
+
+def test_list_store_crud_and_persistence():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "lists.json"
+        ls = ListStore(p)
+        lid = ls.create("My Duets", "Ann", "id_ann")
+        assert lid in ls.lists and ls.lists[lid]["owner_name"] == "Ann"
+        assert ls.add_track(lid, "song1")
+        assert ls.add_track(lid, "song2", version=1)
+        assert [t.get("version") for t in ls.lists[lid]["tracks"]] == [None, 1]
+        assert ls.rename(lid, "Duet Night") and ls.lists[lid]["name"] == "Duet Night"
+        assert ls.set_track_version(lid, 0, 2)
+        assert ls.lists[lid]["tracks"][0]["version"] == 2
+        assert ls.set_track_version(lid, 0, None)          # clear override
+        assert "version" not in ls.lists[lid]["tracks"][0]
+        assert ls.remove_track(lid, 0) and len(ls.lists[lid]["tracks"]) == 1
+        # survives a restart (own file, never touched by session reset)
+        ls2 = ListStore(p)
+        assert ls2.lists[lid]["name"] == "Duet Night"
+        assert ls2.lists[lid]["tracks"][0]["song_id"] == "song2"
+        # default-random pointer persists and clears when its list is deleted
+        assert ls2.set_default_random(lid)
+        assert ListStore(p).default_random == lid
+        assert ls2.delete(lid) and ls2.default_random is None
+        assert lid not in ListStore(p).lists
+
+
+def test_list_store_bad_ops():
+    with tempfile.TemporaryDirectory() as td:
+        ls = ListStore(Path(td) / "lists.json")
+        assert not ls.rename("nope", "x")
+        assert not ls.delete("nope")
+        assert not ls.add_track("nope", "s")
+        lid = ls.create("L", "Bob", "id")
+        assert not ls.remove_track(lid, 0)        # empty list -> bad index
+        assert not ls.set_track_version(lid, 5, 1)
+        assert not ls.set_default_random("nope")  # unknown list id
 
 
 def test_validate_config_kj_pin():

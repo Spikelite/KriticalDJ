@@ -378,6 +378,107 @@ class VersionStore:
                 pass
 
 
+class ListStore:
+    """Persistent singer song-lists (lists.json). NEVER cleared by session
+    reset -- like the singer registry and version picks, lists outlive parties.
+    Each list: {name, owner_name, owner_id, created, tracks:[{song_id,
+    version?}]}. Honor-system, keyed by the owner's name. Also holds
+    `default_random`: the list id the KJ designates as the Random-KJ pool."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.lists: dict = {}
+        self.default_random = None
+        if path.exists():
+            try:
+                d = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(d, dict):
+                    self.lists = d.get("lists", {}) or {}
+                    self.default_random = d.get("default_random")
+            except (ValueError, OSError):
+                self.lists = {}
+
+    def _save(self) -> None:
+        try:
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"lists": self.lists,
+                                       "default_random": self.default_random},
+                                      indent=1, ensure_ascii=False),
+                           encoding="utf-8")
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    def create(self, name: str, owner_name: str, owner_id: str) -> str:
+        with self.lock:
+            lid = uuid.uuid4().hex[:10]
+            self.lists[lid] = {"name": name[:60], "owner_name": owner_name,
+                               "owner_id": owner_id,
+                               "created": round(time.time(), 3), "tracks": []}
+            self._save()
+            return lid
+
+    def rename(self, lid: str, name: str) -> bool:
+        with self.lock:
+            if lid not in self.lists:
+                return False
+            self.lists[lid]["name"] = name[:60]
+            self._save()
+            return True
+
+    def delete(self, lid: str) -> bool:
+        with self.lock:
+            if lid not in self.lists:
+                return False
+            del self.lists[lid]
+            if self.default_random == lid:
+                self.default_random = None
+            self._save()
+            return True
+
+    def add_track(self, lid: str, song_id: str, version=None) -> bool:
+        with self.lock:
+            lst = self.lists.get(lid)
+            if lst is None:
+                return False
+            t = {"song_id": song_id}
+            if version is not None:
+                t["version"] = int(version)
+            lst["tracks"].append(t)
+            self._save()
+            return True
+
+    def remove_track(self, lid: str, index: int) -> bool:
+        with self.lock:
+            lst = self.lists.get(lid)
+            if lst is None or not (0 <= index < len(lst["tracks"])):
+                return False
+            lst["tracks"].pop(index)
+            self._save()
+            return True
+
+    def set_track_version(self, lid: str, index: int, version) -> bool:
+        with self.lock:
+            lst = self.lists.get(lid)
+            if lst is None or not (0 <= index < len(lst["tracks"])):
+                return False
+            if version is None:
+                lst["tracks"][index].pop("version", None)  # clear override
+            else:
+                lst["tracks"][index]["version"] = int(version)
+            self._save()
+            return True
+
+    def set_default_random(self, lid) -> bool:
+        with self.lock:
+            if lid is not None and lid not in self.lists:
+                return False
+            self.default_random = lid
+            self._save()
+            return True
+
+
 class Stats:
     """Append-only party history (stats.jsonl): one JSON line per event
     (queued / started / completed / skipped / removed / session_reset).
@@ -861,7 +962,8 @@ _PLACEHOLDER = ("<!DOCTYPE html><meta charset='utf-8'><title>KriticalDJ</title>"
 
 
 def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flow,
-                 registry: SingerRegistry, stats: Stats, versions: VersionStore):
+                 registry: SingerRegistry, stats: Stats, versions: VersionStore,
+                 lists: "ListStore"):
     media_cache = ROOT / ".media-cache"
     static_dir = ROOT / "static"
     # search order fixed once; sorting 50k+ rows per request would sting on a Pi
@@ -1124,6 +1226,32 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                                   "duration": v.get("duration")}
                                  for i, v in enumerate(vlist)],
                 })
+            if u.path == "/api/lists":
+                # a singer's own saved lists, tracks resolved for display
+                who = parse_qs(u.query).get("singer", [""])[0].strip().casefold()
+                out = []
+                for lid, l in lists.lists.items():
+                    if not who or l.get("owner_name", "").casefold() != who:
+                        continue
+                    tracks = []
+                    for t in l.get("tracks", []):
+                        s = songs.get(t.get("song_id"), {})
+                        nv = len(s.get("versions") or [])
+                        row = {"song_id": t.get("song_id"),
+                               "artist": s.get("artist", "?"),
+                               "title": s.get("title", "?"), "nversions": nv}
+                        if "version" in t:
+                            row["version"] = t["version"]
+                        if nv > 1:
+                            row["versions"] = [
+                                {"index": i, "label": v.get("label", f"Version {i + 1}")}
+                                for i, v in enumerate(s.get("versions") or [])]
+                        tracks.append(row)
+                    out.append({"id": lid, "name": l.get("name", ""),
+                                "owner_name": l.get("owner_name", ""),
+                                "created": l.get("created", 0), "tracks": tracks})
+                out.sort(key=lambda x: x["created"])
+                return self._json({"lists": out})
             if u.path == "/api/songs":
                 qs = parse_qs(u.query)
                 toks = _searchable(" ".join(qs.get("q", [""]))).split()
@@ -1250,6 +1378,85 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 return self._json({"ok": True, "song_id": sid,
                                    "artist": s.get("artist", "?"),
                                    "title": s.get("title", "?")})
+            if u.path == "/api/lists":  # create a new saved list
+                raw = (body.get("singer") or "").strip()[:40]
+                name = (body.get("name") or "").strip()[:60]
+                if not raw or not name:
+                    return self._json({"error": "name and singer required"}, 400)
+                owner, oid = registry.resolve(raw)
+                return self._json({"ok": True, "id": lists.create(name, owner, oid)})
+            if u.path.startswith("/api/lists/"):
+                lp = [p for p in u.path.split("/") if p]  # api lists <id> <action>
+                if len(lp) != 4:
+                    return self._json({"error": "not found"}, 404)
+                lid, action = lp[2], lp[3]
+                lst = lists.lists.get(lid)
+                if lst is None:
+                    return self._json({"error": "unknown list"}, 404)
+                raw = (body.get("singer") or "").strip()[:40]
+                if action == "queue":
+                    # load the whole list into the singer's queue, applying each
+                    # track's per-list version override via the C6 entry version
+                    if not raw:
+                        return self._json({"error": "singer required"}, 400)
+                    singer, _ = registry.resolve(raw)
+                    queued = []
+
+                    def fn():
+                        for t in lst["tracks"]:
+                            sid = t.get("song_id")
+                            if sid not in songs:
+                                continue
+                            state.add_singer(singer, cfg)
+                            entry = {"id": state.next_entry_id, "singer": singer,
+                                     "song_id": sid}
+                            v = t.get("version")
+                            nv = len(songs[sid].get("versions") or [])
+                            if v is not None and 0 <= v < nv:
+                                entry["version"] = v
+                            state.queue.append(entry)
+                            state.next_entry_id += 1
+                            queued.append(sid)
+                    state.mutate(songs, fn)
+                    for sid in queued:
+                        stats.log("queued", singer, flow._info(sid))
+                    return self._json({"ok": True, "queued": len(queued)})
+                # editing actions require ownership (honor-system name match)
+                if raw.casefold() != lst.get("owner_name", "").casefold():
+                    return self._json({"error": "not your list"}, 403)
+                if action == "rename":
+                    nm = (body.get("name") or "").strip()[:60]
+                    if not nm:
+                        return self._json({"error": "name required"}, 400)
+                    return self._json({"ok": lists.rename(lid, nm)})
+                if action == "delete":
+                    return self._json({"ok": lists.delete(lid)})
+                if action == "add":
+                    sid = body.get("song_id")
+                    if sid not in songs:
+                        return self._json({"error": "unknown song"}, 400)
+                    ver = self._int_arg(body, "version")
+                    nv = len(songs[sid].get("versions") or [])
+                    v = ver if (ver is not None and 0 <= ver < nv) else None
+                    return self._json({"ok": lists.add_track(lid, sid, v)})
+                if action == "remove":
+                    idx = self._int_arg(body, "index")
+                    if idx is None:
+                        return self._json({"error": "index must be a number"}, 400)
+                    return self._json({"ok": lists.remove_track(lid, idx)})
+                if action == "set_version":
+                    idx = self._int_arg(body, "index")
+                    if idx is None:
+                        return self._json({"error": "index must be a number"}, 400)
+                    ver = self._int_arg(body, "version")  # None -> clear override
+                    v = None
+                    tracks = lst.get("tracks", [])
+                    if 0 <= idx < len(tracks):
+                        sid = tracks[idx].get("song_id")
+                        nv = len(songs.get(sid, {}).get("versions") or [])
+                        v = ver if (ver is not None and 0 <= ver < nv) else None
+                    return self._json({"ok": lists.set_track_version(lid, idx, v)})
+                return self._json({"error": "unknown action"}, 400)
             if u.path == "/api/screen/ended":
                 flow.song_ended()
                 return self._json({"ok": True})
@@ -1457,11 +1664,12 @@ def main() -> None:
     stats = Stats(ROOT / "stats.jsonl", registry)
     versions = VersionStore(ROOT / "versions.json")
     state.versions = versions  # snapshots surface each song's active pick
+    lists = ListStore(ROOT / "lists.json")
     flow = Flow(state, songs, cfg, stats)
     threading.Thread(target=flow.tick_forever, daemon=True).start()
     server = ThreadingHTTPServer((cfg["host"], cfg["port"]),
                                  make_handler(cfg, cfg_path, state, songs, flow,
-                                              registry, stats, versions))
+                                              registry, stats, versions, lists))
     server.daemon_threads = True
     print(f"[{APP}] singers: {lan_url(cfg)}  |  KJ: {lan_url(cfg)}kj  |  screen: {lan_url(cfg)}screen")
     server.serve_forever()

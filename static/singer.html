@@ -50,6 +50,24 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 .row .del{font-size:18px;color:#e57373;padding:2px 8px;cursor:pointer}
 .row .pos{font-size:12px;color:var(--ok);min-width:34px;text-align:right}
 #meta{color:var(--dim);font-size:13px;padding:8px 14px}
+.listrow{border-bottom:1px solid var(--line)}
+.listhead{display:flex;align-items:center;gap:6px;padding:8px 14px;flex-wrap:wrap}
+.listhead b{font-size:15px}
+.listhead .ct{color:var(--dim);font-size:13px;margin-right:auto}
+.listhead button{font-size:13px;padding:4px 10px;border-radius:7px;border:1px solid #3a3f47;background:var(--bg);color:var(--accent);cursor:pointer}
+.listhead button.x{color:var(--warn)}
+.tracks{padding:2px 14px 10px 22px}
+.track{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:14px;border-top:1px solid var(--line)}
+.track .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.track .vsel{font-size:12px;padding:3px 6px;border-radius:6px;border:1px solid #3a3f47;background:var(--bg);color:var(--text);max-width:42vw}
+.track button.x{border:none;background:none;color:var(--warn);cursor:pointer;font-size:15px}
+.thint{color:var(--dim);font-size:13px;padding:4px 0}
+.newlist{display:flex;gap:6px;padding:8px 14px}
+.newlist input{flex:1;font-size:14px;padding:7px 10px;border-radius:8px;border:1px solid #3a3f47;background:var(--bg);color:var(--text)}
+.newlist button{padding:7px 14px;border-radius:8px;border:1px solid var(--accent);background:var(--bg);color:var(--accent);font-weight:600;cursor:pointer}
+#buildbar{position:fixed;left:0;right:0;bottom:0;background:var(--ok);color:#03240f;padding:10px 14px;font-size:14px;display:none;align-items:center;gap:10px;z-index:5;box-shadow:0 -2px 8px rgba(0,0,0,.4)}
+#buildbar.on{display:flex}
+#buildbar button{margin-left:auto;padding:6px 14px;border-radius:8px;border:none;background:#03240f;color:var(--ok);font-weight:700;cursor:pointer}
 #toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--accent);color:#00222f;
  padding:10px 18px;border-radius:999px;font-weight:700;opacity:0;transition:opacity .25s;pointer-events:none;max-width:90%}
 </style>
@@ -76,13 +94,20 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 <div class="lucky"><button id="randbtn" type="button">&#127922; Random song</button></div>
 </header>
 <section id="minewrap" style="display:none"><h2>My songs</h2><div id="mine"></div></section>
+<section id="listswrap" style="display:none">
+  <h2>My lists</h2>
+  <div id="lists"></div>
+  <div class="newlist"><input id="newlistname" type="text" placeholder="New list name&hellip;" maxlength="60"><button id="newlistbtn" type="button">Create</button></div>
+</section>
 <section><h2 id="reshead">Songs</h2><div id="meta"></div><div id="results"></div></section>
+<div id="buildbar">Adding to <b id="buildname"></b> &mdash; tap a song below<button id="builddone" type="button">Done</button></div>
 <div id="toast"></div>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
 let ME = localStorage.getItem("kdj_name") || "";
 let STATE = null;
+let LISTS = [], BUILDING = null, listsME = null;   // saved-lists state
 
 fetch("/api/config").then(r=>r.json()).then(c=>{ $("party").textContent = c.party_name; document.title = c.party_name; });
 
@@ -142,6 +167,7 @@ function songRow(s, opts){
 }
 
 function renderState(){
+  if(ME !== listsME){ listsME = ME; loadLists(); }  // refetch lists when the singer changes
   if(!STATE){ renderNames(); return; }
   renderNames();
   // banner
@@ -213,7 +239,7 @@ function search(){
       const r=songRow(s,{});
       const add=document.createElement("div"); add.className="add"; add.textContent="+";
       r.appendChild(add);
-      r.onclick=()=>queueSong(s);
+      r.onclick=()=> BUILDING ? addToList(s) : queueSong(s);  // build mode: add to the list instead
       box.appendChild(r);
     }
   });
@@ -231,6 +257,76 @@ function queueRandom(){
     .then(r=>r.json()).then(d=>{ d.ok ? toast("🎲 "+d.title+" — queued for "+ME) : toast("Couldn't pick a song"); });
 }
 $("randbtn").onclick=queueRandom;
+
+// ---- saved lists -----------------------------------------------------------
+function loadLists(){
+  if(!ME){ LISTS=[]; renderLists(); return; }
+  fetch("/api/lists?singer="+encodeURIComponent(ME)).then(r=>r.json())
+    .then(d=>{ LISTS=d.lists||[]; renderLists(); });
+}
+function mkLB(txt,fn,cls){ const b=document.createElement("button"); b.type="button"; b.textContent=txt; if(cls)b.className=cls; b.onclick=fn; return b; }
+function renderLists(){
+  $("listswrap").style.display = ME ? "block" : "none";
+  const box=$("lists"); box.textContent="";
+  for(const L of LISTS){
+    const wrap=document.createElement("div"); wrap.className="listrow";
+    const head=document.createElement("div"); head.className="listhead";
+    const nm=document.createElement("b"); nm.textContent=L.name; head.appendChild(nm);
+    const ct=document.createElement("span"); ct.className="ct"; ct.textContent=" ("+L.tracks.length+")"; head.appendChild(ct);
+    if(L.tracks.length) head.appendChild(mkLB("▶ Load",()=>loadList(L.id)));
+    head.appendChild(mkLB(BUILDING===L.id?"✓ Done":"✎ Edit",()=>toggleBuild(L.id)));
+    head.appendChild(mkLB("Rename",()=>renameList(L.id,L.name)));
+    head.appendChild(mkLB("✕",()=>delList(L.id,L.name),"x"));
+    wrap.appendChild(head);
+    if(BUILDING===L.id){
+      const tb=document.createElement("div"); tb.className="tracks";
+      if(!L.tracks.length){ const e=document.createElement("div"); e.className="thint"; e.textContent="Empty — tap a song in the songbook below to add it."; tb.appendChild(e); }
+      L.tracks.forEach((t,i)=>{
+        const tr=document.createElement("div"); tr.className="track";
+        const tt=document.createElement("span"); tt.className="tt"; tt.textContent=t.title+" — "+t.artist; tr.appendChild(tt);
+        if(t.nversions>1){
+          const sel=document.createElement("select"); sel.className="vsel";
+          sel.appendChild(new Option("Default",""));
+          (t.versions||[]).forEach(v=>sel.appendChild(new Option("v"+(v.index+1)+" · "+v.label,v.index)));
+          sel.value = (t.version!=null)?String(t.version):"";
+          sel.onchange=()=>setTrackVersion(L.id,i,sel.value);
+          tr.appendChild(sel);
+        }
+        tr.appendChild(mkLB("✕",()=>removeTrack(L.id,i),"x"));
+        tb.appendChild(tr);
+      });
+      wrap.appendChild(tb);
+    }
+    box.appendChild(wrap);
+  }
+  syncBuildBar();
+}
+function syncBuildBar(){
+  const L=LISTS.find(x=>x.id===BUILDING);
+  $("buildbar").classList.toggle("on",!!L);
+  if(L) $("buildname").textContent=L.name;
+}
+function createList(){
+  const nm=$("newlistname").value.trim(); if(!nm||!ME) return;
+  fetch("/api/lists",{method:"POST",body:JSON.stringify({singer:ME,name:nm})})
+    .then(r=>r.json()).then(d=>{ $("newlistname").value=""; if(d.id) BUILDING=d.id; loadLists(); toast("List created — tap songs to add"); });
+}
+function loadList(id){ fetch("/api/lists/"+id+"/queue",{method:"POST",body:JSON.stringify({singer:ME})})
+  .then(r=>r.json()).then(d=>{ if(d.ok) toast("Queued "+d.queued+" song"+(d.queued===1?"":"s")+" ✓"); }); }
+function toggleBuild(id){ BUILDING=(BUILDING===id)?null:id; renderLists(); if(BUILDING) window.scrollTo({top:0,behavior:"smooth"}); }
+function renameList(id,cur){ const nm=prompt("Rename list:",cur); if(nm&&nm.trim())
+  fetch("/api/lists/"+id+"/rename",{method:"POST",body:JSON.stringify({singer:ME,name:nm.trim()})}).then(()=>loadLists()); }
+function delList(id,nm){ if(confirm("Delete list \""+nm+"\"?"))
+  fetch("/api/lists/"+id+"/delete",{method:"POST",body:JSON.stringify({singer:ME})}).then(()=>{ if(BUILDING===id)BUILDING=null; loadLists(); }); }
+function addToList(s){ if(!BUILDING) return;
+  fetch("/api/lists/"+BUILDING+"/add",{method:"POST",body:JSON.stringify({singer:ME,song_id:s.song_id})})
+    .then(r=>r.json()).then(d=>{ toast(d.ok?"Added to list ✓":"Couldn't add"); loadLists(); }); }
+function removeTrack(id,i){ fetch("/api/lists/"+id+"/remove",{method:"POST",body:JSON.stringify({singer:ME,index:i})}).then(()=>loadLists()); }
+function setTrackVersion(id,i,val){ const b={singer:ME,index:i}; if(val!=="") b.version=parseInt(val);
+  fetch("/api/lists/"+id+"/set_version",{method:"POST",body:JSON.stringify(b)}).then(()=>loadLists()); }
+$("newlistbtn").onclick=createList;
+$("newlistname").onkeydown=e=>{ if(e.key==="Enter") createList(); };
+$("builddone").onclick=()=>{ BUILDING=null; renderLists(); };
 
 const es=new EventSource("/events");
 es.onmessage=e=>{ STATE=JSON.parse(e.data); renderState(); };
