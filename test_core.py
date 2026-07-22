@@ -516,6 +516,65 @@ def test_start_now_overrides_hold():
         assert st.phase == "playing"
 
 
+def test_manual_order_nudge_and_stickiness():
+    with tempfile.TemporaryDirectory() as td:
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(Path(td) / "state.json")
+        st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob", "Cal"]),
+                                  st.queue.extend([E(1, "Ann"), E(2, "Bob"), E(3, "Cal")])))
+        assert [e["id"] for e in st.rotation_preview()] == [1, 2, 3]  # round-robin
+        # nudge Cal's entry (3) up one -> swaps past Bob (2), sticks
+        st.mutate(songs, lambda: st.move_in_order(3, -1))
+        assert st.manual_order == [1, 3, 2]
+        assert [e["id"] for e in st.rotation_preview()] == [1, 3, 2]
+        # sticky: a late add lands in the fluid tail, never above the bump
+        st.mutate(songs, lambda: (st.singers.append("Dee"), st.queue.append(E(4, "Dee"))))
+        assert [e["id"] for e in st.rotation_preview()] == [1, 3, 2, 4]
+        # the base rotation is untouched: singer order + per-singer FIFO intact
+        assert st.singers == ["Ann", "Bob", "Cal", "Dee"]
+        assert [e["id"] for e in st.queue] == [1, 2, 3, 4]
+
+
+def test_manual_order_bounds_and_unknown():
+    with tempfile.TemporaryDirectory() as td:
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(Path(td) / "state.json")
+        st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob"]),
+                                  st.queue.extend([E(1, "Ann"), E(2, "Bob")])))
+        assert st.move_in_order(1, -1) is False   # already first
+        assert st.move_in_order(2, 1) is False    # already last
+        assert st.move_in_order(99, -1) is False  # unknown entry
+        assert st.manual_order == []              # nothing frozen on a no-op
+
+
+def test_manual_order_reconciles_and_consumes():
+    with tempfile.TemporaryDirectory() as td:
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(Path(td) / "state.json")
+        flow = Flow(st, songs, {"intermission_seconds": 1})
+        st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob", "Cal"]),
+                                  st.queue.extend([E(1, "Ann"), E(2, "Bob"), E(3, "Cal")])))
+        st.mutate(songs, lambda: st.move_in_order(3, -1))
+        assert st.manual_order == [1, 3, 2]
+        # a removed entry drops out of the manual order
+        st.mutate(songs, lambda: st.queue.remove(next(e for e in st.queue if e["id"] == 2)))
+        assert st.manual_order == [1, 3]
+        # playing the front entry consumes it out of the manual order too
+        flow._begin_next()
+        assert st.now["id"] == 1 and st.manual_order == [3]
+
+
+def test_manual_order_survives_restart():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "state.json"
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(p)
+        st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob", "Cal"]),
+                                  st.queue.extend([E(1, "Ann"), E(2, "Bob"), E(3, "Cal")])))
+        st.mutate(songs, lambda: st.move_in_order(3, -1))
+        assert State(p).manual_order == [1, 3, 2]  # journaled
+
+
 def test_random_song_excludes_and_falls_back():
     songs = {"a": {}, "b": {}, "c": {}}
     # one candidate left -> deterministic

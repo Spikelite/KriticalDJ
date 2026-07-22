@@ -452,6 +452,11 @@ class State:
         # projected next they stay next -- people plan around it (see UAT).
         # Passive queue adds can never displace it; KJ reorders reset it.
         self.pinned: int | None = None
+        # KJ hand-arranged prefix of the play order: a sticky list of entry ids
+        # the KJ nudged up/down. Honored ahead of the round-robin WITHOUT
+        # touching singer rotation or per-singer FIFO; drained as entries play
+        # or leave the queue. See move_in_order / rotation_preview.
+        self.manual_order: list[int] = []
         # Intermission hold: seconds left on a FROZEN countdown, or None when
         # it is running. Set while the KJ has Pause down or the queue is
         # empty; the tick loop owns the transitions (see Flow.tick_once).
@@ -466,8 +471,8 @@ class State:
             d = json.loads(self.path.read_text(encoding="utf-8"))
         except (ValueError, OSError):
             return
-        for k in ("singers", "queue", "cursor", "now", "phase",
-                  "deadline", "transport", "next_entry_id", "pinned"):
+        for k in ("singers", "queue", "cursor", "now", "phase", "deadline",
+                  "transport", "next_entry_id", "pinned", "manual_order"):
             if k in d:
                 setattr(self, k, d[k])
         # A power failure mid-song resumes at the intermission board rather
@@ -482,8 +487,8 @@ class State:
 
     def _save(self) -> None:
         d = {k: getattr(self, k) for k in
-             ("singers", "queue", "cursor", "now", "phase",
-              "deadline", "transport", "next_entry_id", "pinned")}
+             ("singers", "queue", "cursor", "now", "phase", "deadline",
+              "transport", "next_entry_id", "pinned", "manual_order")}
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(d, indent=1), encoding="utf-8")
         os.replace(tmp, self.path)
@@ -507,9 +512,14 @@ class State:
             self._broadcast(songs)
 
     def _reconcile_pin(self) -> None:
-        """Drop a pin whose entry left the queue; when unpinned, lock in
-        whoever is projected next RIGHT NOW (first projection wins -- later
-        queue adds must not displace an announced next singer)."""
+        """Reconcile the manual play-order and the up-next pin after any
+        mutation. Manual bumps whose entries left the queue are dropped; a pin
+        whose entry left is dropped; when unpinned, lock in whoever is projected
+        next RIGHT NOW (first projection wins -- later queue adds must not
+        displace an announced next singer)."""
+        if self.manual_order:
+            live = {e["id"] for e in self.queue}
+            self.manual_order = [i for i in self.manual_order if i in live]
         if self.pinned is not None and \
                 not any(e["id"] == self.pinned for e in self.queue):
             self.pinned = None
@@ -520,18 +530,28 @@ class State:
 
     # -- views ---------------------------------------------------------------
     def rotation_preview(self, limit: int = 12) -> list:
-        """Upcoming (singer, entry) order, simulated without mutating. A
-        pinned entry is always first; the simulation continues from the
-        rotation slot after its singer, so only the tail stays fluid."""
+        """Upcoming (singer, entry) order, simulated without mutating. The KJ's
+        manual bumps come first (in order), then the up-next pin, then the
+        round-robin tail continues from the slot after the last fixed singer --
+        so only the tail stays fluid."""
         entries = list(self.queue)
+        by_id = {e["id"]: e for e in entries}
         cursor = self.cursor
         out = []
-        pin = next((e for e in entries if e["id"] == self.pinned), None)
-        if pin is not None:
-            entries.remove(pin)
-            out.append(pin)
-            if pin["singer"] in self.singers:
-                cursor = (self.singers.index(pin["singer"]) + 1) % len(self.singers)
+        # fixed prefix: manual bumps in order, then the pin if not already there
+        prefix = list(self.manual_order)
+        if self.pinned is not None and self.pinned not in prefix:
+            prefix.append(self.pinned)
+        for eid in prefix:
+            e = by_id.get(eid)
+            if e is None or e not in entries:
+                continue
+            entries.remove(e)
+            out.append(e)
+            if e["singer"] in self.singers:
+                cursor = (self.singers.index(e["singer"]) + 1) % len(self.singers)
+            if len(out) >= limit:
+                return out[:limit]
         while len(out) < limit:
             e, cursor = pick_next(self.singers, cursor, entries)
             if e is None:
@@ -539,6 +559,22 @@ class State:
             entries.remove(e)
             out.append(e)
         return out
+
+    def move_in_order(self, entry_id: int, direction: int) -> bool:
+        """Nudge one entry up (dir<0) or down (dir>0) one slot in the effective
+        play order and make it stick, WITHOUT touching singer rotation or
+        per-singer FIFO. Freezes the play order down to the swapped slot into
+        manual_order; entries below stay fluid. Returns True if it moved."""
+        order = [e["id"] for e in self.rotation_preview(limit=len(self.queue))]
+        if entry_id not in order:
+            return False
+        i = order.index(entry_id)
+        j = i + (1 if direction > 0 else -1)
+        if j < 0 or j >= len(order):
+            return False
+        order[i], order[j] = order[j], order[i]
+        self.manual_order = order[:max(i, j) + 1]
+        return True
 
     def snapshot(self, songs: dict) -> dict:
         def song_view(e):
@@ -566,6 +602,7 @@ class State:
                 "singers": list(self.singers),
                 "transport": dict(self.transport),
                 "pinned": self.pinned,
+                "manual_order": list(self.manual_order),
                 "held": self.hold_remaining is not None,
                 "hold_remaining": self.hold_remaining,
             }
@@ -1153,6 +1190,19 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                         state.pinned = None
                 state.mutate(songs, fn)
                 return self._json({"ok": moved[0]})
+            if u.path == "/api/kj/queue_move":
+                # one-off sticky nudge of an entry in the effective play order;
+                # does not touch singer rotation or per-singer FIFO
+                eid = self._int_arg(body, "entry_id")
+                direction = self._int_arg(body, "dir")
+                if eid is None or direction is None:
+                    return self._json({"error": "entry_id and dir must be numbers"}, 400)
+                moved = []
+
+                def fn():
+                    moved.append(state.move_in_order(eid, direction))
+                state.mutate(songs, fn)
+                return self._json({"ok": moved[0]})
             if u.path == "/api/kj/singer_move":
                 direction = self._int_arg(body, "dir")
                 if direction is None:
@@ -1187,6 +1237,7 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                     state.cursor = 0
                     state.now = None
                     state.pinned = None
+                    state.manual_order = []
                     state.phase = "idle"
                     state.deadline = 0.0
                     state.hold_remaining = None
