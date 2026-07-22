@@ -49,11 +49,21 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 #vbox .vrow .g{flex:1}
 #vbox .vrow .tag{color:var(--ok);font-size:12px}
 #vbox .cls{margin-top:6px;width:100%;background:var(--bg)}
+/* join-QR overlay: a walk-up scans this to join mid-party (BYOD). Kept off the
+   console until summoned so it costs no space; mirrors the version modal. */
+#qrov{position:fixed;inset:0;background:rgba(0,0,0,.75);display:none;align-items:center;justify-content:center;z-index:9}
+#qrov.on{display:flex}
+#qrbox{background:var(--panel);border:1px solid #3a3f47;border-radius:12px;padding:20px;max-width:92%;text-align:center}
+#qrbox h3{margin:0 0 12px;font-size:16px}
+#qrcode{background:#fff;padding:14px;border-radius:12px;line-height:0;display:inline-block}
+#qrcode svg{width:min(72vw,340px);height:min(72vw,340px);display:block}
+#qrurl{margin-top:12px;font-size:15px;color:var(--accent);word-break:break-all}
+#qrbox .cls{margin-top:16px;width:100%;background:var(--bg)}
 </style>
 </head>
 <body>
 <header>
-  <h1>KJ Console <small id="party"></small><a href="/setup">&#9881; Setup</a><a href="#" onclick="logout();return false" style="margin-left:14px">&#128274; Lock</a></h1>
+  <h1>KJ Console <small id="party"></small><a href="#" onclick="showQR();return false">&#128241; Join QR</a><a href="/setup" style="margin-left:14px">&#9881; Setup</a><a href="#" onclick="logout();return false" style="margin-left:14px">&#128274; Lock</a></h1>
   <div id="status"></div>
   <div id="qsum"></div>
   <div class="bar">
@@ -85,6 +95,14 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
   <button class="cls" onclick="closeVersions()">Close</button>
 </div></div>
 
+<div id="qrov"><div id="qrbox">
+  <h3 id="qrtitle">Scan to join</h3>
+  <div id="qrcode"></div>
+  <div id="qrurl"></div>
+  <button class="cls" onclick="closeQR()">Close</button>
+</div></div>
+
+<script src="/static/qrcode.js"></script>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
@@ -120,6 +138,23 @@ function openVersions(songId){
 }
 function closeVersions(){ $("vov").classList.remove("on"); }
 $("vov")&&($("vov").onclick=e=>{ if(e.target.id==="vov") closeVersions(); });
+
+// Join QR: same singer URL the screen encodes (CFG.public_url), on demand so a
+// walk-up can scan the KJ's phone/LCD mid-song. Falls back to this origin's / if
+// config hasn't loaded yet (the console is served from the same server anyway).
+function showQR(){
+  const url = (CFG && CFG.public_url) || (location.origin + "/");
+  const box = $("qrcode"); box.textContent = "";
+  try{
+    const q = qrcode(0, "M"); q.addData(url); q.make();
+    box.innerHTML = q.createSvgTag({cellSize:4, margin:0, scalable:true});
+  }catch(e){ box.textContent = "Couldn't build the QR code"; }
+  $("qrurl").textContent = url.replace(/^https?:\/\//,"").replace(/\/$/,"");
+  $("qrtitle").textContent = (CFG && CFG.party_name ? CFG.party_name+" — " : "")+"scan to join";
+  $("qrov").classList.add("on");
+}
+function closeQR(){ $("qrov").classList.remove("on"); }
+$("qrov")&&($("qrov").onclick=e=>{ if(e.target.id==="qrov") closeQR(); });
 function delEntry(id){ fetch("/api/queue/"+id, {method:"DELETE"}); }
 
 function fmtWait(sec){
