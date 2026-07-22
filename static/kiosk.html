@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Karaoke Songbook</title>
+<style>
+:root{--bg:#14161a;--panel:#1e2128;--text:#e8eaed;--dim:#9aa0a6;--accent:#4fc3f7;--line:#22252c;--ok:#7bd88f}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,Arial,sans-serif}
+header{position:sticky;top:0;background:var(--panel);padding:10px 12px;z-index:2;box-shadow:0 2px 8px rgba(0,0,0,.5)}
+h1{font-size:18px;margin:0 0 4px}
+#now{font-size:13px;color:var(--dim);min-height:17px;margin-bottom:8px}
+#now b{color:var(--accent)}
+.step{font-size:12px;color:var(--ok);font-weight:600;letter-spacing:.04em;margin:6px 0 4px}
+.names{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px;align-items:center}
+.names .lbl{font-size:13px;color:var(--dim);margin-right:2px}
+#nameSel{font-size:15px;padding:8px 10px;border-radius:8px;border:1px solid #3a3f47;background:var(--bg);color:var(--text);max-width:60vw}
+#nameSel.none{color:var(--dim)}
+#addform{display:none;gap:6px;align-items:center}
+#addform input{font-size:14px;padding:6px 10px;border-radius:8px;border:1px solid #333;background:var(--bg);color:var(--text);width:130px}
+#addform button{padding:6px 12px;border-radius:8px;border:1px solid #3a3f47;background:var(--bg);color:var(--text);font-size:14px;cursor:pointer}
+.qwrap{position:relative}
+#q{width:100%;font-size:20px;padding:10px 40px 10px 12px;border-radius:10px;border:1px solid #333;background:var(--bg);color:var(--text)}
+#q:focus{outline:2px solid var(--accent)}
+/* iOS Safari never renders the native search clear button; hide it and use ours */
+#q::-webkit-search-cancel-button{-webkit-appearance:none;appearance:none}
+#qclear{position:absolute;right:7px;top:50%;transform:translateY(-50%);display:none;
+ border:none;background:#333;color:var(--text);width:28px;height:28px;border-radius:50%;
+ font-size:15px;line-height:28px;text-align:center;cursor:pointer;padding:0}
+#qclear.show{display:block}
+.filters{display:flex;gap:6px;margin-top:8px}
+.filters button{font-size:13px;padding:6px 14px;border-radius:999px;border:1px solid #3a3f47;background:var(--bg);color:var(--dim);cursor:pointer}
+.filters button.on{background:var(--accent);color:#00222f;border-color:var(--accent);font-weight:600}
+.alpha{display:flex;gap:3px;margin-top:8px;flex-wrap:wrap}
+.alpha button{flex:1;min-width:26px;font-size:12px;padding:5px 0;border-radius:6px;border:1px solid #3a3f47;background:var(--bg);color:var(--dim);cursor:pointer}
+.alpha button.on{background:var(--accent);color:#00222f;border-color:var(--accent);font-weight:700}
+.lucky{display:flex;gap:8px;margin-top:8px}
+.lucky button{font-size:14px;padding:8px 14px;border-radius:999px;border:1px solid var(--accent);background:var(--bg);color:var(--accent);cursor:pointer;font-weight:600}
+.lucky button:disabled{opacity:.45;border-color:#3a3f47;color:var(--dim);cursor:not-allowed}
+.lucky button:active{background:#0e2630}
+section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;padding:12px 14px 4px;margin:0}
+.row{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);cursor:pointer}
+.row .t{flex:1;min-width:0}
+.row .title{font-size:17px}
+.row .artist{font-size:13px;color:var(--dim)}
+.row .dur{font-size:12px;color:var(--dim)}
+.row .add{font-size:22px;color:var(--accent);padding:0 4px}
+.up{display:flex;align-items:baseline;gap:8px;padding:5px 14px;font-size:14px;border-bottom:1px solid var(--line)}
+.up .n{color:var(--dim);min-width:18px;text-align:right}
+.up b{color:var(--text)}
+.up.next b{color:var(--ok)}
+.up .art{color:var(--dim)}
+#meta{color:var(--dim);font-size:13px;padding:8px 14px}
+#toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--accent);color:#00222f;
+ padding:10px 18px;border-radius:999px;font-weight:700;opacity:0;transition:opacity .25s;pointer-events:none;max-width:90%}
+</style>
+</head>
+<body>
+<header>
+<h1 id="party">Karaoke Songbook</h1>
+<div id="now"></div>
+<div class="step">1 &middot; Who's singing?</div>
+<div class="names" id="names">
+  <span class="lbl">Singer:</span>
+  <select id="nameSel" class="none"></select>
+  <span id="addform">
+    <input id="newname" type="text" placeholder="New name" maxlength="40" autocomplete="off">
+    <button id="addok" type="button">OK</button>
+    <button id="addcancel" type="button">Cancel</button>
+  </span>
+</div>
+<div class="step">2 &middot; Pick a song</div>
+<div class="qwrap">
+  <input id="q" type="search" placeholder="Search artist or song&hellip;" autocomplete="off">
+  <button id="qclear" type="button" aria-label="Clear search">&#10005;</button>
+</div>
+<div class="filters" id="filters"><button data-f="all" class="on">All</button><button data-f="artist">Artist</button><button data-f="title">Song title</button></div>
+<div class="alpha" id="alpha"></div>
+<div class="lucky"><button id="randbtn" type="button">&#127922; Random song</button></div>
+</header>
+<section id="upwrap" style="display:none"><h2>Now &amp; next</h2><div id="upcoming"></div></section>
+<section><h2 id="reshead">Songs</h2><div id="meta"></div><div id="results"></div></section>
+<div id="toast"></div>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let ME = "";          // transient: reset to "" after every queue (shared device)
+let STATE = null;
+
+fetch("/api/config").then(r=>r.json()).then(c=>{
+  $("party").textContent = c.party_name + " — Songbook"; document.title = c.party_name + " Songbook"; });
+
+function toast(msg){ const t=$("toast"); t.textContent=msg; t.style.opacity=1; clearTimeout(t._h); t._h=setTimeout(()=>t.style.opacity=0,1900); }
+function setMe(name){ ME=name; renderNames(); }
+
+// Name dropdown: existing singers + "add new". No localStorage -- the device is
+// shared, so identity is transient and returns to the placeholder after each add.
+function renderNames(){
+  const sel=$("nameSel");
+  const names=(STATE?STATE.singers:[]).slice();
+  if(ME && !names.includes(ME)) names.push(ME);
+  sel.textContent="";
+  sel.appendChild(new Option("— choose singer —",""));
+  for(const n of names) sel.appendChild(new Option(n,n));
+  sel.appendChild(new Option("＋ Add a new name…","__add__"));
+  const signedIn = ME && names.includes(ME);
+  sel.value = signedIn ? ME : "";
+  sel.classList.toggle("none", !signedIn);
+}
+function showAddForm(){ $("addform").style.display="flex"; $("nameSel").style.display="none"; const inp=$("newname"); inp.value=""; inp.focus(); }
+function hideAddForm(){ $("addform").style.display="none"; $("nameSel").style.display=""; }
+function submitAddName(){
+  const v=$("newname").value.trim(); if(!v){ hideAddForm(); return; }
+  fetch("/api/singers",{method:"POST",body:JSON.stringify({name:v})})
+    .then(r=>r.json()).then(d=>{ hideAddForm(); setMe(d.name||v); });
+}
+$("nameSel").addEventListener("change",e=>{
+  const v=e.target.value;
+  if(v==="__add__"){ e.target.value=ME||""; showAddForm(); return; }
+  setMe(v);
+});
+$("addok").onclick=submitAddName;
+$("addcancel").onclick=hideAddForm;
+$("newname").onkeydown=e=>{ if(e.key==="Enter") submitAddName(); else if(e.key==="Escape") hideAddForm(); };
+
+function songRow(s){
+  const r=document.createElement("div"); r.className="row";
+  const t=document.createElement("div"); t.className="t";
+  const ti=document.createElement("div"); ti.className="title"; ti.textContent=s.title;
+  const ar=document.createElement("div"); ar.className="artist"; ar.textContent=s.artist;
+  t.appendChild(ti); t.appendChild(ar); r.appendChild(t);
+  if(s.duration){ const d=document.createElement("div"); d.className="dur";
+    d.textContent=Math.floor(s.duration/60)+":"+String(s.duration%60).padStart(2,"0"); r.appendChild(d); }
+  return r;
+}
+
+function renderState(){
+  renderNames();
+  if(!STATE) return;
+  // shared now/next banner -- no personal position, this is everyone's device
+  const n=$("now"); n.textContent="";
+  if(STATE.phase==="playing" && STATE.now){
+    n.innerHTML="&#127908; ";
+    const b=document.createElement("b"); b.textContent=STATE.now.singer; n.appendChild(b);
+    n.appendChild(document.createTextNode(" is singing "+STATE.now.title));
+  } else if(STATE.next){
+    n.appendChild(document.createTextNode("Up next: "));
+    const b=document.createElement("b"); b.textContent=STATE.next.singer; n.appendChild(b);
+    n.appendChild(document.createTextNode(" — "+STATE.next.title));
+  } else {
+    n.textContent="Queue is empty — be the first!";
+  }
+  // compact "now & next" strip so a crowd can see the line at a glance
+  const up=(STATE.upcoming||[]);
+  $("upwrap").style.display = up.length ? "block" : "none";
+  const box=$("upcoming"); box.textContent="";
+  up.slice(0,6).forEach((e,i)=>{
+    const r=document.createElement("div"); r.className="up"+(i===0?" next":"");
+    const num=document.createElement("div"); num.className="n"; num.textContent=(i+1)+"."; r.appendChild(num);
+    const b=document.createElement("b"); b.textContent=e.singer; r.appendChild(b);
+    r.appendChild(document.createTextNode(" — "+e.title));
+    const a=document.createElement("span"); a.className="art"; a.textContent=" · "+e.artist; r.appendChild(a);
+    box.appendChild(r);
+  });
+}
+
+// search: field pills (All / Artist / Song title) + A-Z artist browse
+let FIELD="all", LETTER="";
+$("filters").addEventListener("click",e=>{
+  const f=e.target.dataset.f; if(!f) return; FIELD=f;
+  [...$("filters").children].forEach(b=>b.classList.toggle("on",b.dataset.f===f));
+  search();
+});
+"#ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").forEach(ch=>{
+  const b=document.createElement("button"); b.textContent=ch;
+  b.onclick=()=>{ LETTER=(LETTER===ch)?"":ch;
+    [...$("alpha").children].forEach(x=>x.classList.toggle("on",x.textContent===LETTER)); search(); };
+  $("alpha").appendChild(b);
+});
+
+let timer=null;
+function syncClear(){ $("qclear").classList.toggle("show", $("q").value.length>0); }
+$("q").addEventListener("input",()=>{ syncClear(); clearTimeout(timer); timer=setTimeout(search,180); });
+$("qclear").onclick=()=>{ $("q").value=""; syncClear(); $("q").focus(); search(); };
+function search(){
+  const q=$("q").value.trim();
+  fetch("/api/songs?limit=60&q="+encodeURIComponent(q)+"&field="+FIELD+"&letter="+encodeURIComponent(LETTER))
+   .then(r=>r.json()).then(d=>{
+    $("reshead").textContent = (q||LETTER) ? "Results" : "Browse";
+    $("meta").textContent = d.total===0 ? "No matches." :
+      (d.total>d.songs.length ? d.total.toLocaleString()+" matches — showing "+d.songs.length+". Keep typing." :
+       d.total.toLocaleString()+(d.total===1?" match.":" matches."));
+    const box=$("results"); box.textContent="";
+    for(const s of d.songs){
+      const r=songRow(s);
+      const add=document.createElement("div"); add.className="add"; add.textContent="+";
+      r.appendChild(add);
+      r.onclick=()=>queueSong(s);
+      box.appendChild(r);
+    }
+  });
+}
+
+// The public-songbook loop: queue for the selected singer, then reset to the
+// placeholder and scroll up so the NEXT person picks themselves.
+function needName(){
+  if(!ME){ toast("Pick who's singing first (top)"); window.scrollTo({top:0,behavior:"smooth"}); return true; }
+  return false;
+}
+function afterQueue(msg){
+  toast(msg); setMe("");
+  $("q").value=""; syncClear(); search();
+  window.scrollTo({top:0,behavior:"smooth"});
+}
+function queueSong(s){
+  if(needName()) return;
+  const who=ME;  // capture before the reset
+  fetch("/api/queue",{method:"POST",body:JSON.stringify({song_id:s.song_id,singer:who})})
+    .then(r=>r.json()).then(d=>{ d.ok ? afterQueue("Queued "+s.title+" for "+who+" ✓") : toast("Hmm, that didn't work"); });
+}
+function queueRandom(){
+  if(needName()) return;
+  const who=ME;
+  fetch("/api/queue/random",{method:"POST",body:JSON.stringify({singer:who})})
+    .then(r=>r.json()).then(d=>{ d.ok ? afterQueue("🎲 "+d.title+" for "+who+" ✓") : toast("Couldn't pick a song"); });
+}
+$("randbtn").onclick=queueRandom;
+
+const es=new EventSource("/events");
+es.onmessage=e=>{ STATE=JSON.parse(e.data); renderState(); };
+renderState();
+search();
+</script>
+</body>
+</html>

@@ -941,6 +941,10 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                     return self._page("kjlogin.html", "Locked")
                 return self._page("kj.html" if u.path == "/kj" else "setup.html",
                                    "KJ console")
+            if u.path == "/kiosk":
+                # shared walk-up songbook (no personal identity); default QR
+                # still points at "/" so BYOD phones keep the normal singer UI
+                return self._page("kiosk.html", "Songbook")
             if u.path == "/screen":
                 return self._page("screen.html", "Screen")
             if len(parts) == 2 and parts[0] == "static":
