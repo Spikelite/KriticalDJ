@@ -50,6 +50,13 @@ DEFAULT_CONFIG = {
     "fairness_enabled": True,
     "lock_percent": 33,
     "bump_limit": 2,
+    # Pre-song key tone (#15): sound a short tonic triad and show the song's key
+    # during the countdown so the singer can pitch their entry. Master switch --
+    # singers opt out individually. Only fires on songs song-sorter annotated
+    # with a trusted key; min confidence is a percent applied to machine
+    # estimates only (a manual/tagged key is taken at its word).
+    "key_tone_enabled": True,
+    "key_tone_min_confidence": 50,
 }
 
 
@@ -77,11 +84,13 @@ _CONFIG_FIELDS = {
     "start_now_countdown_seconds": "int", "lyrics_offset_ms": "int",
     "kj_pin": "pin",
     "fairness_enabled": "bool", "lock_percent": "int", "bump_limit": "int",
+    "key_tone_enabled": "bool", "key_tone_min_confidence": "int",
 }
 _CONFIG_LIMITS = {"port": (1, 65535), "intermission_seconds": (3, 600),
                   "start_now_countdown_seconds": (0, 30),
                   "lyrics_offset_ms": (-2000, 2000),
-                  "lock_percent": (0, 100), "bump_limit": (0, 50)}
+                  "lock_percent": (0, 100), "bump_limit": (0, 50),
+                  "key_tone_min_confidence": (0, 100)}
 _RESTART_KEYS = {"host", "port"}  # rebinding the socket can't happen live
 
 
@@ -231,6 +240,14 @@ def scan_library(music_root: str) -> dict:
                 # duration}, ...]. Best copy stays version 0 (the entry above);
                 # these become 1..N, selectable by the KJ.
                 sid = hashlib.sha1(e["path"].encode("utf-8")).hexdigest()[:12]
+                # optional musical key (song-sorter Key-detect -> #15), keyed
+                # PER COPY: the best copy's key rides on the song and on
+                # versions[0]; each alternate below carries its own (they're
+                # often transposed). Absent leaves everything unchanged.
+                kf = key_fields(e)
+                if kf:
+                    songs[sid].update(kf)
+                    songs[sid]["versions"][0].update(kf)
                 for i, alt in enumerate(e.get("versions", []) or [], start=1):
                     ap = root / alt.get("path", "")
                     if not alt.get("path") or not ap.is_file():
@@ -239,6 +256,7 @@ def scan_library(music_root: str) -> dict:
                     if alt.get("duration"):
                         am["duration"] = int(alt["duration"])
                     am["label"] = alt.get("label") or f"Version {i + 1}"
+                    am.update(key_fields(alt))  # this copy's own key, if any
                     songs[sid]["versions"].append(am)
         except (ValueError, OSError, KeyError, TypeError):
             songs = {}
@@ -317,6 +335,12 @@ class SingerRegistry:
             except (ValueError, OSError):
                 self.by_key = {}
 
+    def lookup(self, name: str):
+        """Existing singer id for a name, or None. Unlike resolve() this never
+        creates one, so read-only queries can't mint phantom singers."""
+        rec = self.by_key.get((name or "").strip().casefold())
+        return rec["id"] if rec else None
+
     def resolve(self, name: str) -> tuple:
         """(display_name, singer_id) -- creates the singer on first sight,
         reattaches on any later casing of the same name."""
@@ -370,6 +394,39 @@ class VersionStore:
                 self.by_id.pop(song_id, None)  # 0 = default; keep the file lean
             else:
                 self.by_id[song_id] = int(index)
+            try:
+                tmp = self.path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(self.by_id, indent=1), encoding="utf-8")
+                os.replace(tmp, self.path)
+            except OSError:
+                pass
+
+
+class SingerPrefs:
+    """Per-singer preferences (prefs.json), keyed by the registry's stable
+    singer id so a choice follows the person across parties. Currently just
+    `key_tone` (the pre-song reference tone). Session resets never touch this --
+    it's a personal setting, not party state."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.by_id: dict = {}
+        if path.exists():
+            try:
+                self.by_id = json.loads(path.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                self.by_id = {}
+
+    def get(self, singer_id, name: str, default: bool) -> bool:
+        if not singer_id:
+            return default
+        val = (self.by_id.get(singer_id) or {}).get(name)
+        return default if val is None else bool(val)
+
+    def set(self, singer_id: str, name: str, value: bool) -> None:
+        with self.lock:
+            self.by_id.setdefault(singer_id, {})[name] = bool(value)
             try:
                 tmp = self.path.with_suffix(".tmp")
                 tmp.write_text(json.dumps(self.by_id, indent=1), encoding="utf-8")
@@ -552,6 +609,89 @@ def locked_count(num_singers: int, lock_percent: int) -> int:
     return max(1, min(round(lock_percent / 100 * num_singers), num_singers))
 
 
+# --------------------------------------------------------------------------
+# Musical key -> pre-song reference tone (#15). song-sorter's Key-detect writes
+# an optional canonical `key` ("<Tonic> <major|minor>", sharps) plus a
+# `key_confidence` / `key_source` into index.json; we turn that into a short
+# tonic triad the screen sounds during the countdown.
+
+KEY_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+_FLAT_ALIASES = {"Db": "C#", "Eb": "D#", "Fb": "E", "Gb": "F#", "Ab": "G#",
+                 "Bb": "A#", "Cb": "B"}
+
+
+def parse_key(key) -> tuple | None:
+    """Canonical '<Tonic> <major|minor>' -> (pitch_class, mode), else None.
+    Flat spellings are tolerated in case an index.json is hand-authored."""
+    if not isinstance(key, str):
+        return None
+    parts = key.strip().split()
+    if len(parts) != 2:
+        return None
+    tonic = parts[0][:1].upper() + parts[0][1:].lower()
+    tonic = _FLAT_ALIASES.get(tonic, tonic)
+    mode = parts[1].lower()
+    if mode not in ("major", "minor") or tonic not in KEY_NAMES:
+        return None
+    return KEY_NAMES.index(tonic), mode
+
+
+def key_tone_hz(key) -> list | None:
+    """Key -> the three reference frequencies (tonic, third, fifth) in a
+    comfortable mid-vocal octave (C4-B4), or None if the key won't parse. A
+    triad orients a singer better than a lone note, and the third carries the
+    major/minor colour. NB this is the key's tonic, not necessarily the song's
+    first sung note -- an approximation we're honest about on screen."""
+    parsed = parse_key(key)
+    if parsed is None:
+        return None
+    idx, mode = parsed
+    root = 60 + idx                      # MIDI C4..B4
+    third = root + (3 if mode == "minor" else 4)
+    return [round(440.0 * 2 ** ((n - 69) / 12.0), 2)
+            for n in (root, third, root + 7)]
+
+
+def key_fields(src: dict) -> dict:
+    """Key fields for ONE playable copy, read from an index.json entry (either
+    the song entry or one of its `versions[]`), or {}. song-sorter publishes
+    these only when they clear its confidence gate, so presence is meaningful."""
+    if not src.get("key"):
+        return {}
+    try:
+        conf = float(src.get("key_confidence") or 0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    out = {"key": src["key"], "key_confidence": conf,
+           "key_source": src.get("key_source", "")}
+    if src.get("key_camelot"):
+        out["key_camelot"] = src["key_camelot"]
+    return out
+
+
+def version_key(song: dict, ver: int) -> dict:
+    """Key fields for the copy actually being played, or {}. Every copy is keyed
+    independently -- alternate rips from different karaoke brands are frequently
+    transposed -- so an alternate with no key of its own yields nothing rather
+    than borrowing the best copy's and handing the singer a wrong note."""
+    vlist = song.get("versions") or []
+    src = vlist[ver] if 0 <= ver < len(vlist) else song
+    return key_fields(src)
+
+
+def key_trusted(source: str, confidence, min_confidence: float) -> bool:
+    """Whether a library key is solid enough to sound out loud. Mirrors
+    song-sorter's own rule: a curated or ID3-tagged key is taken at its word;
+    machine estimates (auto/online) must clear the KJ's floor. A wrong key is
+    worse than no key, so anything unparseable fails closed."""
+    if source in ("auto", "online"):
+        try:
+            return float(confidence) >= min_confidence
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 def random_pool_track(tracks: list, songs: dict, exclude: set):
     """Pick a random track from a KJ pool list whose song is in the library and
     not already queued; fall back to any in-library track. Returns the track
@@ -580,6 +720,8 @@ class State:
                                          # snapshots show each song's active pick
         self.kj_random_fn = None         # callable -> bool: is a Random-KJ pool
                                          # available? attached in make_handler
+        self.key_tone_fn = None          # callable(song, singer, version) -> the
+                                         # pre-song key/tone payload, or None
         self.next_entry_id = 1
         # The locked "up next" slot: entry id, or None. Once someone is
         # projected next they stay next -- people plan around it (see UAT).
@@ -761,14 +903,19 @@ class State:
             row = {"id": e["id"], "singer": e["singer"], "song_id": e["song_id"],
                    "artist": s.get("artist", "?"), "title": s.get("title", "?"),
                    "duration": s.get("duration"), "nversions": nv}
+            # effective version: a per-entry override wins over the global pick
+            ev = e.get("version")
+            eff = ev if ev is not None else (
+                self.versions.get(e["song_id"]) if self.versions is not None else 0)
+            eff = eff if isinstance(eff, int) and 0 <= eff < max(nv, 1) else 0
             if nv > 1 and self.versions is not None:
-                # a per-entry override wins over the KJ's global pick
-                ev = e.get("version")
-                idx = ev if ev is not None else self.versions.get(e["song_id"])
-                idx = idx if isinstance(idx, int) and 0 <= idx < nv else 0
-                row["vsel"] = idx + 1  # 1-based for display (v1 = best)
+                row["vsel"] = eff + 1  # 1-based for display (v1 = best)
                 if ev is not None:
-                    row["ver"] = idx   # 0-based; the screen requests ?v=this
+                    row["ver"] = eff   # 0-based; the screen requests ?v=this
+            if self.key_tone_fn is not None:
+                kt = self.key_tone_fn(s, e["singer"], eff)
+                if kt:
+                    row.update(kt)     # key / key_camelot / key_tone / tone_hz
             return row
         with self.lock:
             up = self.rotation_preview()
@@ -976,7 +1123,7 @@ _PLACEHOLDER = ("<!DOCTYPE html><meta charset='utf-8'><title>KriticalDJ</title>"
 
 def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flow,
                  registry: SingerRegistry, stats: Stats, versions: VersionStore,
-                 lists: "ListStore"):
+                 lists: "ListStore", prefs: "SingerPrefs"):
     media_cache = ROOT / ".media-cache"
     static_dir = ROOT / "static"
     # search order fixed once; sorting 50k+ rows per request would sting on a Pi
@@ -994,6 +1141,33 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
         lists.default_random and lists.default_random in lists.lists
         and any(t.get("song_id") in songs
                 for t in lists.lists[lists.default_random].get("tracks", [])))
+
+    def _key_tone(song: dict, singer: str, ver: int):
+        """Pre-song key payload for one queue entry, or None (stay silent).
+        Silent unless: the feature is on, the copy THIS entry will actually play
+        carries a key we trust (each copy is keyed independently, so an
+        alternate never borrows the best copy's), and the singer hasn't opted
+        out. Anything short of that stays quiet -- a wrong key is worse none."""
+        if not cfg.get("key_tone_enabled", True):
+            return None
+        kf = version_key(song, ver)
+        key = kf.get("key")
+        if not key:
+            return None
+        floor = int(cfg.get("key_tone_min_confidence", 50)) / 100.0
+        if not key_trusted(kf.get("key_source", ""),
+                           kf.get("key_confidence", 0), floor):
+            return None
+        hz = key_tone_hz(key)
+        if not hz:
+            return None
+        if not prefs.get(registry.lookup(singer), "key_tone", True):
+            return None
+        out = {"key": key, "key_tone": True, "tone_hz": hz}
+        if kf.get("key_camelot"):
+            out["key_camelot"] = kf["key_camelot"]
+        return out
+    state.key_tone_fn = _key_tone
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -1209,7 +1383,9 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                                    "lyrics_offset_ms": cfg["lyrics_offset_ms"],
                                    "fairness_enabled": cfg.get("fairness_enabled", True),
                                    "lock_percent": cfg.get("lock_percent", 33),
-                                   "bump_limit": cfg.get("bump_limit", 2)})
+                                   "bump_limit": cfg.get("bump_limit", 2),
+                                   "key_tone_enabled": cfg.get("key_tone_enabled", True),
+                                   "key_tone_min_confidence": cfg.get("key_tone_min_confidence", 50)})
             if u.path == "/api/stats/summary":
                 played, queued, singers_c = Counter(), Counter(), Counter()
                 events = resets = 0
@@ -1275,6 +1451,13 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                                 "created": l.get("created", 0), "tracks": tracks})
                 out.sort(key=lambda x: x["created"])
                 return self._json({"lists": out})
+            if u.path == "/api/prefs":
+                # a singer's own settings; lookup never mints a phantom singer
+                who = parse_qs(u.query).get("singer", [""])[0]
+                return self._json({
+                    "key_tone": prefs.get(registry.lookup(who), "key_tone", True),
+                    "key_tone_enabled": bool(cfg.get("key_tone_enabled", True)),
+                })
             if u.path == "/api/kj/lists":  # moderation view: everyone's lists
                 if not self._authed():
                     return self._json({"error": "auth required"}, 401)
@@ -1462,6 +1645,17 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 return self._json({"ok": True, "song_id": sid,
                                    "artist": s.get("artist", "?"),
                                    "title": s.get("title", "?")})
+            if u.path == "/api/prefs":
+                raw = (body.get("singer") or "").strip()[:40]
+                if not raw:
+                    return self._json({"error": "singer required"}, 400)
+                _name, sid = registry.resolve(raw)
+                if "key_tone" in body:
+                    prefs.set(sid, "key_tone", bool(body.get("key_tone")))
+                # nudge the surfaces so /screen picks the change up immediately
+                state.mutate(songs, lambda: None)
+                return self._json({"ok": True,
+                                   "key_tone": prefs.get(sid, "key_tone", True)})
             if u.path == "/api/lists":  # create a new saved list
                 raw = (body.get("singer") or "").strip()[:40]
                 name = (body.get("name") or "").strip()[:60]
@@ -1769,11 +1963,13 @@ def main() -> None:
     versions = VersionStore(ROOT / "versions.json")
     state.versions = versions  # snapshots surface each song's active pick
     lists = ListStore(ROOT / "lists.json")
+    prefs = SingerPrefs(ROOT / "prefs.json")
     flow = Flow(state, songs, cfg, stats)
     threading.Thread(target=flow.tick_forever, daemon=True).start()
     server = ThreadingHTTPServer((cfg["host"], cfg["port"]),
                                  make_handler(cfg, cfg_path, state, songs, flow,
-                                              registry, stats, versions, lists))
+                                              registry, stats, versions, lists,
+                                              prefs))
     server.daemon_threads = True
     print(f"[{APP}] singers: {lan_url(cfg)}  |  KJ: {lan_url(cfg)}kj  |  screen: {lan_url(cfg)}screen")
     server.serve_forever()

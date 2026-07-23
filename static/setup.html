@@ -83,6 +83,8 @@ const CFGF = [
   ["fairness_enabled", "Fair queue (protect the top, new singers up fast)", "checkbox", "off = classic join-order round-robin"],
   ["lock_percent", "Locked top of queue (%)", "number", "top N% of singers can't be bumped by newcomers"],
   ["bump_limit", "Max bumps before a singer is protected", "number", "how many newcomers can jump a waiting veteran"],
+  ["key_tone_enabled", "Pre-song key tone", "checkbox", "sound the song's key during the countdown; singers can opt out individually"],
+  ["key_tone_min_confidence", "Minimum key confidence (%)", "number", "machine-estimated keys below this stay silent; curated/tagged keys always play"],
   ["host", "Bind address", "text", "needs a service restart"],
   ["port", "Port", "number", "needs a service restart"],
   ["kj_pin", "KJ access PIN (4 digits)", "password", "unlocks /kj and /setup — blank keeps the current PIN"],

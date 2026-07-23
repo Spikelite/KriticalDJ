@@ -50,6 +50,9 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 .row .del{font-size:18px;color:#e57373;padding:2px 8px;cursor:pointer}
 .row .pos{font-size:12px;color:var(--ok);min-width:34px;text-align:right}
 #meta{color:var(--dim);font-size:13px;padding:8px 14px}
+#tonepref{font-size:13px;color:var(--dim);margin-bottom:8px}
+#tonepref label{display:flex;align-items:center;gap:7px;cursor:pointer}
+#tonepref input{width:16px;height:16px}
 .listrow{border-bottom:1px solid var(--line)}
 .listhead{display:flex;align-items:center;gap:6px;padding:8px 14px;flex-wrap:wrap}
 .listhead b{font-size:15px}
@@ -85,6 +88,7 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
     <button id="addcancel" type="button">Cancel</button>
   </span>
 </div>
+<div id="tonepref"><label><input type="checkbox" id="tonechk"> &#127911; Play a starting note before my song</label></div>
 <div class="qwrap">
   <input id="q" type="search" placeholder="Search artist or song&hellip;" autocomplete="off">
   <button id="qclear" type="button" aria-label="Clear search">&#10005;</button>
@@ -167,7 +171,7 @@ function songRow(s, opts){
 }
 
 function renderState(){
-  if(ME !== listsME){ listsME = ME; loadLists(); }  // refetch lists when the singer changes
+  if(ME !== listsME){ listsME = ME; loadLists(); loadPrefs(); }  // singer changed
   if($("kjrandbtn")) $("kjrandbtn").disabled = !(STATE && STATE.kj_random);
   if(!STATE){ renderNames(); return; }
   renderNames();
@@ -266,6 +270,23 @@ function queueKJRandom(){
       : toast(d.error==="no KJ pool set" ? "KJ hasn't set up picks yet" : "Couldn't pick a song"); });
 }
 $("kjrandbtn").onclick=queueKJRandom;
+
+// ---- my settings: pre-song starting note (#15) -----------------------------
+// Server-side per singer (the shared screen needs the UPCOMING singer's choice,
+// so this can't live in this phone's localStorage). Hidden when the KJ has the
+// feature switched off entirely.
+function loadPrefs(){
+  if(!ME){ $("tonepref").style.display="none"; return; }
+  fetch("/api/prefs?singer="+encodeURIComponent(ME)).then(r=>r.json()).then(d=>{
+    $("tonepref").style.display = d.key_tone_enabled ? "block" : "none";
+    $("tonechk").checked = !!d.key_tone;
+  });
+}
+$("tonechk").onchange=()=>{
+  if(!ME){ $("tonechk").checked=false; toast("Pick your name first (top of screen)"); return; }
+  fetch("/api/prefs",{method:"POST",body:JSON.stringify({singer:ME,key_tone:$("tonechk").checked})})
+    .then(r=>r.json()).then(d=>toast(d.key_tone?"Starting note on 🎧":"Starting note off"));
+};
 
 // ---- saved lists -----------------------------------------------------------
 function loadLists(){

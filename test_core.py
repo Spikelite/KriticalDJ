@@ -5,10 +5,11 @@ import time
 import zipfile
 from pathlib import Path
 
-from kriticaldj import (Flow, ListStore, SingerRegistry, State, Stats,
-                        VersionStore, locked_count, move_entry, move_singer,
+from kriticaldj import (Flow, ListStore, SingerPrefs, SingerRegistry, State,
+                        Stats, VersionStore, key_tone_hz, key_trusted,
+                        locked_count, move_entry, move_singer, parse_key,
                         parse_title, pick_next, random_pool_track, random_song,
-                        scan_library, validate_config_changes)
+                        scan_library, validate_config_changes, version_key)
 
 E = lambda i, s: {"id": i, "singer": s, "song_id": "x"}
 
@@ -371,6 +372,97 @@ def test_entry_version_override_in_snapshot():
         rows = {r["id"]: r for r in st.snapshot(songs)["upcoming"]}
         assert rows[2]["vsel"] == 2                            # non-override follows the global
         assert rows[1]["vsel"] == 1 and rows[1]["ver"] == 0   # override is independent, stays v1
+
+
+def test_parse_key_and_tone_hz():
+    assert parse_key("A minor") == (9, "minor")
+    assert parse_key("c# MAJOR") == (1, "major")
+    assert parse_key("Bb minor") == (10, "minor")     # flat spelling tolerated
+    for bad in (None, "", "A", "H minor", "A diminished", 7, "A minor extra"):
+        assert parse_key(bad) is None
+    # A minor -> A4 / C5 / E5 (tonic, minor third, fifth)
+    assert key_tone_hz("A minor") == [440.0, 523.25, 659.26]
+    # C major -> C4 / E4 / G4; the third is what carries the mode
+    assert key_tone_hz("C major") == [261.63, 329.63, 392.0]
+    assert key_tone_hz("C minor")[1] != key_tone_hz("C major")[1]
+    assert key_tone_hz("nope") is None
+
+
+def test_key_trusted():
+    assert key_trusted("manual", 0.0, 0.5) is True   # curated key wins outright
+    assert key_trusted("tag", 0.1, 0.5) is True      # ID3 TKEY taken at its word
+    assert key_trusted("auto", 0.82, 0.5) is True
+    assert key_trusted("auto", 0.31, 0.5) is False   # under the floor -> silent
+    assert key_trusted("online", 0.50, 0.5) is True
+    assert key_trusted("auto", "junk", 0.5) is False  # unparseable fails closed
+
+
+def test_singer_prefs_default_set_persist():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "prefs.json"
+        pr = SingerPrefs(p)
+        assert pr.get("id1", "key_tone", True) is True   # default when unset
+        assert pr.get(None, "key_tone", True) is True    # unknown singer
+        pr.set("id1", "key_tone", False)
+        assert pr.get("id1", "key_tone", True) is False  # explicit opt-out wins
+        assert SingerPrefs(p).get("id1", "key_tone", True) is False  # persists
+
+
+def test_scan_reads_optional_key_per_copy():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        for stem in ("best", "altkeyed", "altplain", "plain"):
+            (root / f"{stem}.mp3").write_bytes(b"m")
+            (root / f"{stem}.cdg").write_bytes(b"c")
+        (root / "index.json").write_text(json.dumps({"songs": [
+            {"path": "best.mp3", "artist": "Q", "title": "Bo", "key": "A minor",
+             "key_confidence": 0.82, "key_source": "auto", "key_camelot": "8A",
+             "versions": [
+                 {"path": "altkeyed.mp3", "label": "Brand X", "key": "C major",
+                  "key_confidence": 0.71, "key_source": "auto"},
+                 {"path": "altplain.mp3", "label": "Brand Y"},  # no key of its own
+             ]},
+            {"path": "plain.mp3", "artist": "A", "title": "Sos"},  # no key
+        ]}), encoding="utf-8")
+        songs = scan_library(str(root))
+        keyed = [s for s in songs.values() if s["title"] == "Bo"][0]
+        plain = [s for s in songs.values() if s["title"] == "Sos"][0]
+        assert keyed["key"] == "A minor" and keyed["key_confidence"] == 0.82
+        assert keyed["key_source"] == "auto" and keyed["key_camelot"] == "8A"
+        assert "key" not in plain          # absent upstream stays absent here
+        # keyed PER COPY: v0 mirrors the best copy, alternates carry their own
+        v = keyed["versions"]
+        assert v[0]["key"] == "A minor"
+        assert v[1]["key"] == "C major" and v[1]["key_confidence"] == 0.71
+        assert "key" not in v[2]           # a rip with no confident key of its own
+
+
+def test_version_key_per_copy():
+    song = {"key": "A minor", "key_confidence": 0.8, "key_source": "auto",
+            "versions": [{"key": "A minor", "key_confidence": 0.8, "key_source": "auto"},
+                         {"key": "C major", "key_confidence": 0.7, "key_source": "auto"},
+                         {"label": "unkeyed rip"}]}
+    assert version_key(song, 0)["key"] == "A minor"
+    assert version_key(song, 1)["key"] == "C major"   # its own, not the best copy's
+    assert version_key(song, 2) == {}                 # never borrows a sibling's key
+    assert version_key({"versions": []}, 0) == {}
+    # no versions list at all -> falls back to the song's own fields
+    assert version_key({"key": "D major", "key_source": "manual"}, 0)["key"] == "D major"
+
+
+def test_snapshot_key_tone_payload():
+    with tempfile.TemporaryDirectory() as td:
+        st = State(Path(td) / "s.json")
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t", "key": "A minor"}}
+        st.mutate(songs, lambda: (st.singers.append("Ann"),
+                                  st.queue.append(E(1, "Ann"))))
+        assert "key" not in st.snapshot(songs)["upcoming"][0]   # no fn -> silent
+        st.key_tone_fn = lambda song, singer, ver: (
+            {"key": song["key"], "key_tone": True, "tone_hz": [440.0]}
+            if song.get("key") and ver == 0 else None)
+        row = st.snapshot(songs)["upcoming"][0]
+        assert row["key"] == "A minor" and row["key_tone"] is True
+        assert row["tone_hz"] == [440.0]
 
 
 def test_random_pool_track():

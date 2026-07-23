@@ -58,6 +58,11 @@ body[data-view="count"] #count{display:flex}
 #bignum{font-size:34vh;font-weight:800;color:var(--accent);font-variant-numeric:tabular-nums;line-height:1}
 #countwho{font-size:5vh}
 #countwho b{color:var(--accent)}
+/* pre-song key reference: the countdown view is otherwise empty space, so the
+   hint can't collide with lyrics or the rotation board */
+#keyhint{font-size:3.2vh;color:var(--ok);min-height:4.5vh;text-align:center;opacity:0;transition:opacity .4s}
+#keyhint.on{opacity:1}
+#keyhint b{font-size:4.2vh;font-weight:800}
 
 /* ---- audio unlock gate ---- */
 #gate{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
@@ -93,6 +98,7 @@ body[data-view="count"] #count{display:flex}
 <div class="view" id="count">
   <div id="bignum">3</div>
   <div id="countwho"></div>
+  <div id="keyhint"></div>
 </div>
 <div id="gate">&#128266; Tap once to enable sound</div>
 <script src="/static/cdgraphics.js"></script>
@@ -126,7 +132,11 @@ function tryPlay() {
   audio.play().then(() => { $("gate").style.display = "none"; })
     .catch(() => { $("gate").style.display = "flex"; });
 }
-$("gate").onclick = () => tryPlay();
+$("gate").onclick = () => {
+  // the same gesture unlocks the key-tone oscillator, not just the track audio
+  if (actx && actx.state === "suspended") actx.resume();
+  tryPlay();
+};
 
 // ---- song loading + CDG render loop ----------------------------------------
 async function loadSong(entry) {
@@ -202,6 +212,32 @@ setInterval(() => {
   $("upnext").classList.remove("show");
 }, 200);
 
+// ---- pre-song key reference tone (#15) --------------------------------------
+// A short tonic triad through the same speaker as the music, so the singer can
+// pitch their entry. Server decides IF and sends the exact frequencies; this
+// just sounds them. Silent if Web Audio is unavailable.
+let actx = null, tonedFor = null;
+function playKeyTone(freqs) {
+  try {
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state === "suspended") actx.resume();
+    const t0 = actx.currentTime + 0.08, dur = 0.42, gap = 0.34;
+    freqs.forEach((f, i) => {
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = "sine";
+      o.frequency.value = f;
+      const s = t0 + i * gap;
+      g.gain.setValueAtTime(0.0001, s);
+      g.gain.exponentialRampToValueAtTime(0.22, s + 0.04);
+      g.gain.exponentialRampToValueAtTime(0.0001, s + dur);
+      o.connect(g);
+      g.connect(actx.destination);
+      o.start(s);
+      o.stop(s + dur + 0.02);
+    });
+  } catch (e) { /* no Web Audio: the countdown just stays silent */ }
+}
+
 // ---- state application ------------------------------------------------------
 function apply() {
   const st = STATE;
@@ -265,13 +301,30 @@ function apply() {
     $("timer").textContent = "";
   }
 
-  // start-now countdown labels
+  // start-now countdown labels + the pre-song key reference (#15)
   if (st.phase === "countdown" && up.length) {
     $("countwho").textContent = "";
     const b = document.createElement("b");
     b.textContent = up[0].singer;
     $("countwho").appendChild(b);
     $("countwho").appendChild(document.createTextNode(" — " + up[0].title));
+    const e0 = up[0], kh = $("keyhint");
+    if (e0.key_tone && e0.tone_hz) {
+      kh.textContent = "";
+      kh.appendChild(document.createTextNode("♪ Key of "));
+      const kb = document.createElement("b");
+      kb.textContent = e0.key;
+      kh.appendChild(kb);
+      kh.appendChild(document.createTextNode(" — listen for your starting note"));
+      kh.classList.add("on");
+      if (tonedFor !== e0.id) { tonedFor = e0.id; playKeyTone(e0.tone_hz); }
+    } else {
+      kh.classList.remove("on");
+      kh.textContent = "";
+    }
+  } else {
+    tonedFor = null;                    // re-arm for the next countdown
+    $("keyhint").classList.remove("on");
   }
 }
 
