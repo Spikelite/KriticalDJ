@@ -5,9 +5,11 @@ import time
 import zipfile
 from pathlib import Path
 
-from kriticaldj import (Flow, SingerRegistry, State, Stats, VersionStore,
-                        move_entry, move_singer, parse_title, pick_next,
-                        scan_library, validate_config_changes)
+from kriticaldj import (Flow, ListStore, SingerPrefs, SingerRegistry, State,
+                        Stats, VersionStore, key_tone_hz, key_trusted,
+                        locked_count, move_entry, move_singer, parse_key,
+                        parse_title, pick_next, random_pool_track, random_song,
+                        scan_library, validate_config_changes, version_key)
 
 E = lambda i, s: {"id": i, "singer": s, "song_id": "x"}
 
@@ -353,6 +355,178 @@ def test_snapshot_shows_selected_version():
         assert "vsel" not in st.snapshot(songs)["upcoming"][0]
 
 
+def test_entry_version_override_in_snapshot():
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        st = State(td / "s.json")
+        st.versions = VersionStore(td / "versions.json")
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t",
+                       "versions": [{"label": "Best"}, {"label": "Duet"}]}}
+        st.mutate(songs, lambda: (st.singers.append("Ann"),
+                  st.queue.extend([{"id": 1, "singer": "Ann", "song_id": "x", "version": 0},
+                                   {"id": 2, "singer": "Ann", "song_id": "x"}])))
+        rows = {r["id"]: r for r in st.snapshot(songs)["upcoming"]}
+        assert rows[1]["vsel"] == 1 and rows[1]["ver"] == 0    # explicit override to v1
+        assert rows[2]["vsel"] == 1 and "ver" not in rows[2]   # no override -> global default
+        st.versions.set("x", 1)                                # KJ moves the GLOBAL pick to v2
+        rows = {r["id"]: r for r in st.snapshot(songs)["upcoming"]}
+        assert rows[2]["vsel"] == 2                            # non-override follows the global
+        assert rows[1]["vsel"] == 1 and rows[1]["ver"] == 0   # override is independent, stays v1
+
+
+def test_parse_key_and_tone_hz():
+    assert parse_key("A minor") == (9, "minor")
+    assert parse_key("c# MAJOR") == (1, "major")
+    assert parse_key("Bb minor") == (10, "minor")     # flat spelling tolerated
+    for bad in (None, "", "A", "H minor", "A diminished", 7, "A minor extra"):
+        assert parse_key(bad) is None
+    # A minor -> A4 / C5 / E5 (tonic, minor third, fifth)
+    assert key_tone_hz("A minor") == [440.0, 523.25, 659.26]
+    # C major -> C4 / E4 / G4; the third is what carries the mode
+    assert key_tone_hz("C major") == [261.63, 329.63, 392.0]
+    assert key_tone_hz("C minor")[1] != key_tone_hz("C major")[1]
+    assert key_tone_hz("nope") is None
+
+
+def test_key_trusted():
+    assert key_trusted("manual", 0.0, 0.5) is True   # curated key wins outright
+    assert key_trusted("tag", 0.1, 0.5) is True      # ID3 TKEY taken at its word
+    assert key_trusted("auto", 0.82, 0.5) is True
+    assert key_trusted("auto", 0.31, 0.5) is False   # under the floor -> silent
+    assert key_trusted("online", 0.50, 0.5) is True
+    assert key_trusted("auto", "junk", 0.5) is False  # unparseable fails closed
+
+
+def test_singer_prefs_default_set_persist():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "prefs.json"
+        pr = SingerPrefs(p)
+        assert pr.get("id1", "key_tone", True) is True   # default when unset
+        assert pr.get(None, "key_tone", True) is True    # unknown singer
+        pr.set("id1", "key_tone", False)
+        assert pr.get("id1", "key_tone", True) is False  # explicit opt-out wins
+        assert SingerPrefs(p).get("id1", "key_tone", True) is False  # persists
+
+
+def test_scan_reads_optional_key_per_copy():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        for stem in ("best", "altkeyed", "altplain", "plain"):
+            (root / f"{stem}.mp3").write_bytes(b"m")
+            (root / f"{stem}.cdg").write_bytes(b"c")
+        (root / "index.json").write_text(json.dumps({"songs": [
+            {"path": "best.mp3", "artist": "Q", "title": "Bo", "key": "A minor",
+             "key_confidence": 0.82, "key_source": "auto", "key_camelot": "8A",
+             "versions": [
+                 {"path": "altkeyed.mp3", "label": "Brand X", "key": "C major",
+                  "key_confidence": 0.71, "key_source": "auto"},
+                 {"path": "altplain.mp3", "label": "Brand Y"},  # no key of its own
+             ]},
+            {"path": "plain.mp3", "artist": "A", "title": "Sos"},  # no key
+        ]}), encoding="utf-8")
+        songs = scan_library(str(root))
+        keyed = [s for s in songs.values() if s["title"] == "Bo"][0]
+        plain = [s for s in songs.values() if s["title"] == "Sos"][0]
+        assert keyed["key"] == "A minor" and keyed["key_confidence"] == 0.82
+        assert keyed["key_source"] == "auto" and keyed["key_camelot"] == "8A"
+        assert "key" not in plain          # absent upstream stays absent here
+        # keyed PER COPY: v0 mirrors the best copy, alternates carry their own
+        v = keyed["versions"]
+        assert v[0]["key"] == "A minor"
+        assert v[1]["key"] == "C major" and v[1]["key_confidence"] == 0.71
+        assert "key" not in v[2]           # a rip with no confident key of its own
+
+
+def test_version_key_per_copy():
+    song = {"key": "A minor", "key_confidence": 0.8, "key_source": "auto",
+            "versions": [{"key": "A minor", "key_confidence": 0.8, "key_source": "auto"},
+                         {"key": "C major", "key_confidence": 0.7, "key_source": "auto"},
+                         {"label": "unkeyed rip"}]}
+    assert version_key(song, 0)["key"] == "A minor"
+    assert version_key(song, 1)["key"] == "C major"   # its own, not the best copy's
+    assert version_key(song, 2) == {}                 # never borrows a sibling's key
+    assert version_key({"versions": []}, 0) == {}
+    # no versions list at all -> falls back to the song's own fields
+    assert version_key({"key": "D major", "key_source": "manual"}, 0)["key"] == "D major"
+
+
+def test_snapshot_key_tone_payload():
+    with tempfile.TemporaryDirectory() as td:
+        st = State(Path(td) / "s.json")
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t", "key": "A minor"}}
+        st.mutate(songs, lambda: (st.singers.append("Ann"),
+                                  st.queue.append(E(1, "Ann"))))
+        assert "key" not in st.snapshot(songs)["upcoming"][0]   # no fn -> silent
+        st.key_tone_fn = lambda song, singer, ver: (
+            {"key": song["key"], "key_tone": True, "tone_hz": [440.0]}
+            if song.get("key") and ver == 0 else None)
+        row = st.snapshot(songs)["upcoming"][0]
+        assert row["key"] == "A minor" and row["key_tone"] is True
+        assert row["tone_hz"] == [440.0]
+
+
+def test_random_pool_track():
+    songs = {"a": {}, "b": {}, "c": {}}
+    tracks = [{"song_id": "a"}, {"song_id": "b", "version": 1}, {"song_id": "gone"}]
+    # 'gone' isn't in the library (skipped); 'a' excluded -> only 'b' is eligible
+    for _ in range(20):
+        assert random_pool_track(tracks, songs, {"a"})["song_id"] == "b"
+    # all eligible excluded -> fall back to any in-library track
+    assert random_pool_track(tracks, songs, {"a", "b"})["song_id"] in ("a", "b")
+    # a picked track keeps its version override
+    assert random_pool_track([{"song_id": "b", "version": 1}], songs, set())["version"] == 1
+    assert random_pool_track([], songs, set()) is None
+    assert random_pool_track([{"song_id": "gone"}], songs, set()) is None  # none in library
+
+
+def test_snapshot_kj_random_flag():
+    with tempfile.TemporaryDirectory() as td:
+        st = State(Path(td) / "s.json")
+        assert "kj_random" not in st.snapshot({})   # no fn attached -> absent
+        st.kj_random_fn = lambda: True
+        assert st.snapshot({})["kj_random"] is True
+        st.kj_random_fn = lambda: False
+        assert st.snapshot({})["kj_random"] is False
+
+
+def test_list_store_crud_and_persistence():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "lists.json"
+        ls = ListStore(p)
+        lid = ls.create("My Duets", "Ann", "id_ann")
+        assert lid in ls.lists and ls.lists[lid]["owner_name"] == "Ann"
+        assert ls.add_track(lid, "song1")
+        assert ls.add_track(lid, "song2", version=1)
+        assert [t.get("version") for t in ls.lists[lid]["tracks"]] == [None, 1]
+        assert ls.rename(lid, "Duet Night") and ls.lists[lid]["name"] == "Duet Night"
+        assert ls.set_track_version(lid, 0, 2)
+        assert ls.lists[lid]["tracks"][0]["version"] == 2
+        assert ls.set_track_version(lid, 0, None)          # clear override
+        assert "version" not in ls.lists[lid]["tracks"][0]
+        assert ls.remove_track(lid, 0) and len(ls.lists[lid]["tracks"]) == 1
+        # survives a restart (own file, never touched by session reset)
+        ls2 = ListStore(p)
+        assert ls2.lists[lid]["name"] == "Duet Night"
+        assert ls2.lists[lid]["tracks"][0]["song_id"] == "song2"
+        # default-random pointer persists and clears when its list is deleted
+        assert ls2.set_default_random(lid)
+        assert ListStore(p).default_random == lid
+        assert ls2.delete(lid) and ls2.default_random is None
+        assert lid not in ListStore(p).lists
+
+
+def test_list_store_bad_ops():
+    with tempfile.TemporaryDirectory() as td:
+        ls = ListStore(Path(td) / "lists.json")
+        assert not ls.rename("nope", "x")
+        assert not ls.delete("nope")
+        assert not ls.add_track("nope", "s")
+        lid = ls.create("L", "Bob", "id")
+        assert not ls.remove_track(lid, 0)        # empty list -> bad index
+        assert not ls.set_track_version(lid, 5, 1)
+        assert not ls.set_default_random("nope")  # unknown list id
+
+
 def test_validate_config_kj_pin():
     cfg = {"kj_pin": "0000"}
     # a blank PIN field means "keep current" -- not a change, not an error
@@ -514,6 +688,166 @@ def test_start_now_overrides_hold():
         _force_deadline_past(st, songs)
         flow.tick_once()
         assert st.phase == "playing"
+
+
+FAIR = {"fairness_enabled": True, "lock_percent": 33, "bump_limit": 2}
+
+
+def test_locked_count():
+    assert locked_count(6, 33) == 2     # round(1.98)
+    assert locked_count(3, 33) == 1     # round(0.99)
+    assert locked_count(2, 33) == 1     # round(0.66) -> 1
+    assert locked_count(10, 0) == 1     # floor: always protect the up-next slot
+    assert locked_count(5, 100) == 5    # everyone locked
+    assert locked_count(0, 33) == 0     # nobody
+
+
+def test_add_singer_fairness_off_appends():
+    with tempfile.TemporaryDirectory() as td:
+        st = State(Path(td) / "s.json")
+        st.singers = ["A", "B", "C"]
+        st.add_singer("D", {"fairness_enabled": False})
+        assert st.singers == ["A", "B", "C", "D"]
+
+
+def test_add_singer_newbie_jumps_veterans_below_lock():
+    with tempfile.TemporaryDirectory() as td:
+        st = State(Path(td) / "s.json")
+        st.singers = ["A", "B", "C", "D", "E", "F"]
+        st.performed = ["A", "B", "C", "D", "E", "F"]   # all veterans
+        st.add_singer("X", FAIR)                         # newcomer (newbie)
+        # lock 33% of 6 = 2 -> A,B protected; X lands right below them
+        assert st.singers == ["A", "B", "X", "C", "D", "E", "F"]
+        assert st.bumps == {"C": 1, "D": 1, "E": 1, "F": 1}  # each jumped vet
+
+
+def test_add_singer_newbie_never_bumps_newbie():
+    with tempfile.TemporaryDirectory() as td:
+        st = State(Path(td) / "s.json")
+        st.singers = ["N1", "N2", "V"]      # two waiting newbies, one veteran
+        st.performed = ["V"]
+        st.add_singer("X", FAIR)            # newbie
+        # lock=1 (N1). X goes AFTER waiting newbie N2, ahead of veteran V
+        assert st.singers == ["N1", "N2", "X", "V"]
+        assert st.bumps == {"V": 1}
+
+
+def test_add_singer_bump_cap_protects_veteran():
+    with tempfile.TemporaryDirectory() as td:
+        st = State(Path(td) / "s.json")
+        st.singers = ["A", "V"]
+        st.performed = ["A", "V"]
+        st.bumps = {"V": 2}                 # V already at the cap
+        st.add_singer("X", FAIR)           # newbie
+        assert st.singers == ["A", "V", "X"]   # V protected -> X lands behind it
+        assert st.bumps == {"V": 2}            # no further bump
+
+
+def test_add_singer_veteran_rejoin_appends():
+    with tempfile.TemporaryDirectory() as td:
+        st = State(Path(td) / "s.json")
+        st.singers = ["A", "B"]
+        st.performed = ["A", "B", "V"]      # V sang, then was kicked; now rejoining
+        st.add_singer("V", FAIR)
+        assert st.singers == ["A", "B", "V"]   # no newbie boost for a veteran
+        assert st.bumps == {}
+
+
+def test_performed_and_bump_reset_on_turn():
+    with tempfile.TemporaryDirectory() as td:
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(Path(td) / "s.json")
+        flow = Flow(st, songs, {"intermission_seconds": 1})
+        st.mutate(songs, lambda: (st.singers.append("Ann"),
+                                  st.queue.append(E(1, "Ann"))))
+        st.mutate(songs, lambda: st.bumps.__setitem__("Ann", 1))  # pretend bumped
+        flow._begin_next()                  # Ann takes her turn
+        assert "Ann" in st.performed        # veteran this session now
+        assert "Ann" not in st.bumps        # counter reset on her turn
+
+
+def test_validate_config_bool_and_fairness():
+    cfg = {"fairness_enabled": True, "lock_percent": 33, "bump_limit": 2}
+    ch, err, _ = validate_config_changes(cfg, {"fairness_enabled": False})
+    assert ch == {"fairness_enabled": False} and not err
+    ch, err, _ = validate_config_changes(cfg, {"fairness_enabled": "on"})
+    assert ch == {} and not err         # "on" == True == current -> no change
+    ch, _, _ = validate_config_changes(cfg, {"lock_percent": "150"})
+    assert ch["lock_percent"] == 100    # clamped to range
+    ch, _, _ = validate_config_changes(cfg, {"bump_limit": "-5"})
+    assert ch["bump_limit"] == 0
+
+
+def test_manual_order_nudge_and_stickiness():
+    with tempfile.TemporaryDirectory() as td:
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(Path(td) / "state.json")
+        st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob", "Cal"]),
+                                  st.queue.extend([E(1, "Ann"), E(2, "Bob"), E(3, "Cal")])))
+        assert [e["id"] for e in st.rotation_preview()] == [1, 2, 3]  # round-robin
+        # nudge Cal's entry (3) up one -> swaps past Bob (2), sticks
+        st.mutate(songs, lambda: st.move_in_order(3, -1))
+        assert st.manual_order == [1, 3, 2]
+        assert [e["id"] for e in st.rotation_preview()] == [1, 3, 2]
+        # sticky: a late add lands in the fluid tail, never above the bump
+        st.mutate(songs, lambda: (st.singers.append("Dee"), st.queue.append(E(4, "Dee"))))
+        assert [e["id"] for e in st.rotation_preview()] == [1, 3, 2, 4]
+        # the base rotation is untouched: singer order + per-singer FIFO intact
+        assert st.singers == ["Ann", "Bob", "Cal", "Dee"]
+        assert [e["id"] for e in st.queue] == [1, 2, 3, 4]
+
+
+def test_manual_order_bounds_and_unknown():
+    with tempfile.TemporaryDirectory() as td:
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(Path(td) / "state.json")
+        st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob"]),
+                                  st.queue.extend([E(1, "Ann"), E(2, "Bob")])))
+        assert st.move_in_order(1, -1) is False   # already first
+        assert st.move_in_order(2, 1) is False    # already last
+        assert st.move_in_order(99, -1) is False  # unknown entry
+        assert st.manual_order == []              # nothing frozen on a no-op
+
+
+def test_manual_order_reconciles_and_consumes():
+    with tempfile.TemporaryDirectory() as td:
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(Path(td) / "state.json")
+        flow = Flow(st, songs, {"intermission_seconds": 1})
+        st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob", "Cal"]),
+                                  st.queue.extend([E(1, "Ann"), E(2, "Bob"), E(3, "Cal")])))
+        st.mutate(songs, lambda: st.move_in_order(3, -1))
+        assert st.manual_order == [1, 3, 2]
+        # a removed entry drops out of the manual order
+        st.mutate(songs, lambda: st.queue.remove(next(e for e in st.queue if e["id"] == 2)))
+        assert st.manual_order == [1, 3]
+        # playing the front entry consumes it out of the manual order too
+        flow._begin_next()
+        assert st.now["id"] == 1 and st.manual_order == [3]
+
+
+def test_manual_order_survives_restart():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "state.json"
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(p)
+        st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob", "Cal"]),
+                                  st.queue.extend([E(1, "Ann"), E(2, "Bob"), E(3, "Cal")])))
+        st.mutate(songs, lambda: st.move_in_order(3, -1))
+        assert State(p).manual_order == [1, 3, 2]  # journaled
+
+
+def test_random_song_excludes_and_falls_back():
+    songs = {"a": {}, "b": {}, "c": {}}
+    # one candidate left -> deterministic
+    assert random_song(songs, {"a", "b"}) == "c"
+    # excluding everything falls back to the whole library (never dead-ends)
+    assert random_song(songs, {"a", "b", "c"}) in songs
+    # empty library -> None
+    assert random_song({}, set()) is None
+    # a normal pick is always a real, non-excluded id
+    for _ in range(20):
+        assert random_song(songs, {"a"}) in ("b", "c")
 
 
 if __name__ == "__main__":

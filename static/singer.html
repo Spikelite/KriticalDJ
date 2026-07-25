@@ -36,6 +36,10 @@ h1{font-size:18px;margin:0 0 4px}
 .alpha{display:flex;gap:3px;margin-top:8px;flex-wrap:wrap}
 .alpha button{flex:1;min-width:26px;font-size:12px;padding:5px 0;border-radius:6px;border:1px solid #3a3f47;background:var(--bg);color:var(--dim);cursor:pointer}
 .alpha button.on{background:var(--accent);color:#00222f;border-color:var(--accent);font-weight:700}
+.lucky{display:flex;gap:8px;margin-top:8px}
+.lucky button{font-size:14px;padding:8px 14px;border-radius:999px;border:1px solid var(--accent);background:var(--bg);color:var(--accent);cursor:pointer;font-weight:600}
+.lucky button:disabled{opacity:.45;border-color:#3a3f47;color:var(--dim);cursor:not-allowed}
+.lucky button:active{background:#0e2630}
 section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;padding:12px 14px 4px;margin:0}
 .row{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);cursor:pointer}
 .row .t{flex:1;min-width:0}
@@ -46,6 +50,27 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 .row .del{font-size:18px;color:#e57373;padding:2px 8px;cursor:pointer}
 .row .pos{font-size:12px;color:var(--ok);min-width:34px;text-align:right}
 #meta{color:var(--dim);font-size:13px;padding:8px 14px}
+#tonepref{font-size:13px;color:var(--dim);margin-bottom:8px}
+#tonepref label{display:flex;align-items:center;gap:7px;cursor:pointer}
+#tonepref input{width:16px;height:16px}
+.listrow{border-bottom:1px solid var(--line)}
+.listhead{display:flex;align-items:center;gap:6px;padding:8px 14px;flex-wrap:wrap}
+.listhead b{font-size:15px}
+.listhead .ct{color:var(--dim);font-size:13px;margin-right:auto}
+.listhead button{font-size:13px;padding:4px 10px;border-radius:7px;border:1px solid #3a3f47;background:var(--bg);color:var(--accent);cursor:pointer}
+.listhead button.x{color:var(--warn)}
+.tracks{padding:2px 14px 10px 22px}
+.track{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:14px;border-top:1px solid var(--line)}
+.track .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.track .vsel{font-size:12px;padding:3px 6px;border-radius:6px;border:1px solid #3a3f47;background:var(--bg);color:var(--text);max-width:42vw}
+.track button.x{border:none;background:none;color:var(--warn);cursor:pointer;font-size:15px}
+.thint{color:var(--dim);font-size:13px;padding:4px 0}
+.newlist{display:flex;gap:6px;padding:8px 14px}
+.newlist input{flex:1;font-size:14px;padding:7px 10px;border-radius:8px;border:1px solid #3a3f47;background:var(--bg);color:var(--text)}
+.newlist button{padding:7px 14px;border-radius:8px;border:1px solid var(--accent);background:var(--bg);color:var(--accent);font-weight:600;cursor:pointer}
+#buildbar{position:fixed;left:0;right:0;bottom:0;background:var(--ok);color:#03240f;padding:10px 14px;font-size:14px;display:none;align-items:center;gap:10px;z-index:5;box-shadow:0 -2px 8px rgba(0,0,0,.4)}
+#buildbar.on{display:flex}
+#buildbar button{margin-left:auto;padding:6px 14px;border-radius:8px;border:none;background:#03240f;color:var(--ok);font-weight:700;cursor:pointer}
 #toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--accent);color:#00222f;
  padding:10px 18px;border-radius:999px;font-weight:700;opacity:0;transition:opacity .25s;pointer-events:none;max-width:90%}
 </style>
@@ -63,21 +88,30 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
     <button id="addcancel" type="button">Cancel</button>
   </span>
 </div>
+<div id="tonepref"><label><input type="checkbox" id="tonechk"> &#127911; Play a starting note before my song</label></div>
 <div class="qwrap">
   <input id="q" type="search" placeholder="Search artist or song&hellip;" autocomplete="off">
   <button id="qclear" type="button" aria-label="Clear search">&#10005;</button>
 </div>
 <div class="filters" id="filters"><button data-f="all" class="on">All</button><button data-f="artist">Artist</button><button data-f="title">Song title</button></div>
 <div class="alpha" id="alpha"></div>
+<div class="lucky"><button id="randbtn" type="button">&#127922; Random song</button><button id="kjrandbtn" type="button" disabled>&#127911; KJ pick</button></div>
 </header>
 <section id="minewrap" style="display:none"><h2>My songs</h2><div id="mine"></div></section>
+<section id="listswrap" style="display:none">
+  <h2>My lists</h2>
+  <div id="lists"></div>
+  <div class="newlist"><input id="newlistname" type="text" placeholder="New list name&hellip;" maxlength="60"><button id="newlistbtn" type="button">Create</button></div>
+</section>
 <section><h2 id="reshead">Songs</h2><div id="meta"></div><div id="results"></div></section>
+<div id="buildbar">Adding to <b id="buildname"></b> &mdash; tap a song below<button id="builddone" type="button">Done</button></div>
 <div id="toast"></div>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
 let ME = localStorage.getItem("kdj_name") || "";
 let STATE = null;
+let LISTS = [], BUILDING = null, listsME = null;   // saved-lists state
 
 fetch("/api/config").then(r=>r.json()).then(c=>{ $("party").textContent = c.party_name; document.title = c.party_name; });
 
@@ -137,6 +171,8 @@ function songRow(s, opts){
 }
 
 function renderState(){
+  if(ME !== listsME){ listsME = ME; loadLists(); loadPrefs(); }  // singer changed
+  if($("kjrandbtn")) $("kjrandbtn").disabled = !(STATE && STATE.kj_random);
   if(!STATE){ renderNames(); return; }
   renderNames();
   // banner
@@ -208,7 +244,7 @@ function search(){
       const r=songRow(s,{});
       const add=document.createElement("div"); add.className="add"; add.textContent="+";
       r.appendChild(add);
-      r.onclick=()=>queueSong(s);
+      r.onclick=()=> BUILDING ? addToList(s) : queueSong(s);  // build mode: add to the list instead
       box.appendChild(r);
     }
   });
@@ -218,6 +254,109 @@ function queueSong(s){
   fetch("/api/queue",{method:"POST",body:JSON.stringify({song_id:s.song_id,singer:ME})})
     .then(r=>r.json()).then(d=>{ if(d.ok) toast("Queued for "+ME+" ✓"); else toast("Hmm, that didn't work"); });
 }
+// "Surprise me": the server picks a random library song (skipping anything
+// already queued or on stage) and queues it for the current singer.
+function queueRandom(){
+  if(!ME){ toast("Pick your name first (top of screen)"); window.scrollTo({top:0,behavior:"smooth"}); return; }
+  fetch("/api/queue/random",{method:"POST",body:JSON.stringify({singer:ME})})
+    .then(r=>r.json()).then(d=>{ d.ok ? toast("🎲 "+d.title+" — queued for "+ME) : toast("Couldn't pick a song"); });
+}
+$("randbtn").onclick=queueRandom;
+// KJ pick: a random song from the KJ's curated pool list (honors its versions)
+function queueKJRandom(){
+  if(!ME){ toast("Pick your name first (top of screen)"); window.scrollTo({top:0,behavior:"smooth"}); return; }
+  fetch("/api/queue/random_kj",{method:"POST",body:JSON.stringify({singer:ME})})
+    .then(r=>r.json()).then(d=>{ d.ok ? toast("🎧 "+d.title+" — queued for "+ME)
+      : toast(d.error==="no KJ pool set" ? "KJ hasn't set up picks yet" : "Couldn't pick a song"); });
+}
+$("kjrandbtn").onclick=queueKJRandom;
+
+// ---- my settings: pre-song starting note (#15) -----------------------------
+// Server-side per singer (the shared screen needs the UPCOMING singer's choice,
+// so this can't live in this phone's localStorage). Hidden when the KJ has the
+// feature switched off entirely.
+function loadPrefs(){
+  if(!ME){ $("tonepref").style.display="none"; return; }
+  fetch("/api/prefs?singer="+encodeURIComponent(ME)).then(r=>r.json()).then(d=>{
+    $("tonepref").style.display = d.key_tone_enabled ? "block" : "none";
+    $("tonechk").checked = !!d.key_tone;
+  });
+}
+$("tonechk").onchange=()=>{
+  if(!ME){ $("tonechk").checked=false; toast("Pick your name first (top of screen)"); return; }
+  fetch("/api/prefs",{method:"POST",body:JSON.stringify({singer:ME,key_tone:$("tonechk").checked})})
+    .then(r=>r.json()).then(d=>toast(d.key_tone?"Starting note on 🎧":"Starting note off"));
+};
+
+// ---- saved lists -----------------------------------------------------------
+function loadLists(){
+  if(!ME){ LISTS=[]; renderLists(); return; }
+  fetch("/api/lists?singer="+encodeURIComponent(ME)).then(r=>r.json())
+    .then(d=>{ LISTS=d.lists||[]; renderLists(); });
+}
+function mkLB(txt,fn,cls){ const b=document.createElement("button"); b.type="button"; b.textContent=txt; if(cls)b.className=cls; b.onclick=fn; return b; }
+function renderLists(){
+  $("listswrap").style.display = ME ? "block" : "none";
+  const box=$("lists"); box.textContent="";
+  for(const L of LISTS){
+    const wrap=document.createElement("div"); wrap.className="listrow";
+    const head=document.createElement("div"); head.className="listhead";
+    const nm=document.createElement("b"); nm.textContent=L.name; head.appendChild(nm);
+    const ct=document.createElement("span"); ct.className="ct"; ct.textContent=" ("+L.tracks.length+")"; head.appendChild(ct);
+    if(L.tracks.length) head.appendChild(mkLB("▶ Load",()=>loadList(L.id)));
+    head.appendChild(mkLB(BUILDING===L.id?"✓ Done":"✎ Edit",()=>toggleBuild(L.id)));
+    head.appendChild(mkLB("Rename",()=>renameList(L.id,L.name)));
+    head.appendChild(mkLB("✕",()=>delList(L.id,L.name),"x"));
+    wrap.appendChild(head);
+    if(BUILDING===L.id){
+      const tb=document.createElement("div"); tb.className="tracks";
+      if(!L.tracks.length){ const e=document.createElement("div"); e.className="thint"; e.textContent="Empty — tap a song in the songbook below to add it."; tb.appendChild(e); }
+      L.tracks.forEach((t,i)=>{
+        const tr=document.createElement("div"); tr.className="track";
+        const tt=document.createElement("span"); tt.className="tt"; tt.textContent=t.title+" — "+t.artist; tr.appendChild(tt);
+        if(t.nversions>1){
+          const sel=document.createElement("select"); sel.className="vsel";
+          sel.appendChild(new Option("Default",""));
+          (t.versions||[]).forEach(v=>sel.appendChild(new Option("v"+(v.index+1)+" · "+v.label,v.index)));
+          sel.value = (t.version!=null)?String(t.version):"";
+          sel.onchange=()=>setTrackVersion(L.id,i,sel.value);
+          tr.appendChild(sel);
+        }
+        tr.appendChild(mkLB("✕",()=>removeTrack(L.id,i),"x"));
+        tb.appendChild(tr);
+      });
+      wrap.appendChild(tb);
+    }
+    box.appendChild(wrap);
+  }
+  syncBuildBar();
+}
+function syncBuildBar(){
+  const L=LISTS.find(x=>x.id===BUILDING);
+  $("buildbar").classList.toggle("on",!!L);
+  if(L) $("buildname").textContent=L.name;
+}
+function createList(){
+  const nm=$("newlistname").value.trim(); if(!nm||!ME) return;
+  fetch("/api/lists",{method:"POST",body:JSON.stringify({singer:ME,name:nm})})
+    .then(r=>r.json()).then(d=>{ $("newlistname").value=""; if(d.id) BUILDING=d.id; loadLists(); toast("List created — tap songs to add"); });
+}
+function loadList(id){ fetch("/api/lists/"+id+"/queue",{method:"POST",body:JSON.stringify({singer:ME})})
+  .then(r=>r.json()).then(d=>{ if(d.ok) toast("Queued "+d.queued+" song"+(d.queued===1?"":"s")+" ✓"); }); }
+function toggleBuild(id){ BUILDING=(BUILDING===id)?null:id; renderLists(); if(BUILDING) window.scrollTo({top:0,behavior:"smooth"}); }
+function renameList(id,cur){ const nm=prompt("Rename list:",cur); if(nm&&nm.trim())
+  fetch("/api/lists/"+id+"/rename",{method:"POST",body:JSON.stringify({singer:ME,name:nm.trim()})}).then(()=>loadLists()); }
+function delList(id,nm){ if(confirm("Delete list \""+nm+"\"?"))
+  fetch("/api/lists/"+id+"/delete",{method:"POST",body:JSON.stringify({singer:ME})}).then(()=>{ if(BUILDING===id)BUILDING=null; loadLists(); }); }
+function addToList(s){ if(!BUILDING) return;
+  fetch("/api/lists/"+BUILDING+"/add",{method:"POST",body:JSON.stringify({singer:ME,song_id:s.song_id})})
+    .then(r=>r.json()).then(d=>{ toast(d.ok?"Added to list ✓":"Couldn't add"); loadLists(); }); }
+function removeTrack(id,i){ fetch("/api/lists/"+id+"/remove",{method:"POST",body:JSON.stringify({singer:ME,index:i})}).then(()=>loadLists()); }
+function setTrackVersion(id,i,val){ const b={singer:ME,index:i}; if(val!=="") b.version=parseInt(val);
+  fetch("/api/lists/"+id+"/set_version",{method:"POST",body:JSON.stringify(b)}).then(()=>loadLists()); }
+$("newlistbtn").onclick=createList;
+$("newlistname").onkeydown=e=>{ if(e.key==="Enter") createList(); };
+$("builddone").onclick=()=>{ BUILDING=null; renderLists(); };
 
 const es=new EventSource("/events");
 es.onmessage=e=>{ STATE=JSON.parse(e.data); renderState(); };

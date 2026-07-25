@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import socket
 import sys
@@ -42,6 +43,20 @@ DEFAULT_CONFIG = {
     # 4-digit gate for the operator surfaces (/kj, /setup). Change it from the
     # setup screen; default is deliberately obvious so first boot isn't locked.
     "kj_pin": "0000",
+    # Fair queue (UAT round 3): lock the top lock_percent of singers so
+    # newcomers can't bump them. A newcomer who hasn't sung this session slots
+    # in ahead of bumpable veterans but behind waiting newbies; a waiting
+    # veteran can be jumped at most bump_limit times before being protected too.
+    "fairness_enabled": True,
+    "lock_percent": 33,
+    "bump_limit": 2,
+    # Pre-song key tone (#15): sound a short tonic triad and show the song's key
+    # during the countdown so the singer can pitch their entry. Master switch --
+    # singers opt out individually. Only fires on songs song-sorter annotated
+    # with a trusted key; min confidence is a percent applied to machine
+    # estimates only (a manual/tagged key is taken at its word).
+    "key_tone_enabled": True,
+    "key_tone_min_confidence": 50,
 }
 
 
@@ -68,10 +83,14 @@ _CONFIG_FIELDS = {
     "host": "str", "port": "int", "intermission_seconds": "int",
     "start_now_countdown_seconds": "int", "lyrics_offset_ms": "int",
     "kj_pin": "pin",
+    "fairness_enabled": "bool", "lock_percent": "int", "bump_limit": "int",
+    "key_tone_enabled": "bool", "key_tone_min_confidence": "int",
 }
 _CONFIG_LIMITS = {"port": (1, 65535), "intermission_seconds": (3, 600),
                   "start_now_countdown_seconds": (0, 30),
-                  "lyrics_offset_ms": (-2000, 2000)}
+                  "lyrics_offset_ms": (-2000, 2000),
+                  "lock_percent": (0, 100), "bump_limit": (0, 50),
+                  "key_tone_min_confidence": (0, 100)}
 _RESTART_KEYS = {"host", "port"}  # rebinding the socket can't happen live
 
 
@@ -102,6 +121,9 @@ def validate_config_changes(cfg: dict, body: dict):
             if not (val.isdigit() and len(val) == 4):
                 errors.append("KJ PIN must be exactly 4 digits")
                 continue
+        elif kind == "bool":
+            val = (val.strip().lower() in ("1", "true", "on", "yes")
+                   if isinstance(val, str) else bool(val))
         else:
             if not isinstance(val, str):
                 errors.append(f"{key} must be text")
@@ -218,6 +240,14 @@ def scan_library(music_root: str) -> dict:
                 # duration}, ...]. Best copy stays version 0 (the entry above);
                 # these become 1..N, selectable by the KJ.
                 sid = hashlib.sha1(e["path"].encode("utf-8")).hexdigest()[:12]
+                # optional musical key (song-sorter Key-detect -> #15), keyed
+                # PER COPY: the best copy's key rides on the song and on
+                # versions[0]; each alternate below carries its own (they're
+                # often transposed). Absent leaves everything unchanged.
+                kf = key_fields(e)
+                if kf:
+                    songs[sid].update(kf)
+                    songs[sid]["versions"][0].update(kf)
                 for i, alt in enumerate(e.get("versions", []) or [], start=1):
                     ap = root / alt.get("path", "")
                     if not alt.get("path") or not ap.is_file():
@@ -226,6 +256,7 @@ def scan_library(music_root: str) -> dict:
                     if alt.get("duration"):
                         am["duration"] = int(alt["duration"])
                     am["label"] = alt.get("label") or f"Version {i + 1}"
+                    am.update(key_fields(alt))  # this copy's own key, if any
                     songs[sid]["versions"].append(am)
         except (ValueError, OSError, KeyError, TypeError):
             songs = {}
@@ -304,6 +335,12 @@ class SingerRegistry:
             except (ValueError, OSError):
                 self.by_key = {}
 
+    def lookup(self, name: str):
+        """Existing singer id for a name, or None. Unlike resolve() this never
+        creates one, so read-only queries can't mint phantom singers."""
+        rec = self.by_key.get((name or "").strip().casefold())
+        return rec["id"] if rec else None
+
     def resolve(self, name: str) -> tuple:
         """(display_name, singer_id) -- creates the singer on first sight,
         reattaches on any later casing of the same name."""
@@ -365,6 +402,140 @@ class VersionStore:
                 pass
 
 
+class SingerPrefs:
+    """Per-singer preferences (prefs.json), keyed by the registry's stable
+    singer id so a choice follows the person across parties. Currently just
+    `key_tone` (the pre-song reference tone). Session resets never touch this --
+    it's a personal setting, not party state."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.by_id: dict = {}
+        if path.exists():
+            try:
+                self.by_id = json.loads(path.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                self.by_id = {}
+
+    def get(self, singer_id, name: str, default: bool) -> bool:
+        if not singer_id:
+            return default
+        val = (self.by_id.get(singer_id) or {}).get(name)
+        return default if val is None else bool(val)
+
+    def set(self, singer_id: str, name: str, value: bool) -> None:
+        with self.lock:
+            self.by_id.setdefault(singer_id, {})[name] = bool(value)
+            try:
+                tmp = self.path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(self.by_id, indent=1), encoding="utf-8")
+                os.replace(tmp, self.path)
+            except OSError:
+                pass
+
+
+class ListStore:
+    """Persistent singer song-lists (lists.json). NEVER cleared by session
+    reset -- like the singer registry and version picks, lists outlive parties.
+    Each list: {name, owner_name, owner_id, created, tracks:[{song_id,
+    version?}]}. Honor-system, keyed by the owner's name. Also holds
+    `default_random`: the list id the KJ designates as the Random-KJ pool."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.lists: dict = {}
+        self.default_random = None
+        if path.exists():
+            try:
+                d = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(d, dict):
+                    self.lists = d.get("lists", {}) or {}
+                    self.default_random = d.get("default_random")
+            except (ValueError, OSError):
+                self.lists = {}
+
+    def _save(self) -> None:
+        try:
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"lists": self.lists,
+                                       "default_random": self.default_random},
+                                      indent=1, ensure_ascii=False),
+                           encoding="utf-8")
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    def create(self, name: str, owner_name: str, owner_id: str) -> str:
+        with self.lock:
+            lid = uuid.uuid4().hex[:10]
+            self.lists[lid] = {"name": name[:60], "owner_name": owner_name,
+                               "owner_id": owner_id,
+                               "created": round(time.time(), 3), "tracks": []}
+            self._save()
+            return lid
+
+    def rename(self, lid: str, name: str) -> bool:
+        with self.lock:
+            if lid not in self.lists:
+                return False
+            self.lists[lid]["name"] = name[:60]
+            self._save()
+            return True
+
+    def delete(self, lid: str) -> bool:
+        with self.lock:
+            if lid not in self.lists:
+                return False
+            del self.lists[lid]
+            if self.default_random == lid:
+                self.default_random = None
+            self._save()
+            return True
+
+    def add_track(self, lid: str, song_id: str, version=None) -> bool:
+        with self.lock:
+            lst = self.lists.get(lid)
+            if lst is None:
+                return False
+            t = {"song_id": song_id}
+            if version is not None:
+                t["version"] = int(version)
+            lst["tracks"].append(t)
+            self._save()
+            return True
+
+    def remove_track(self, lid: str, index: int) -> bool:
+        with self.lock:
+            lst = self.lists.get(lid)
+            if lst is None or not (0 <= index < len(lst["tracks"])):
+                return False
+            lst["tracks"].pop(index)
+            self._save()
+            return True
+
+    def set_track_version(self, lid: str, index: int, version) -> bool:
+        with self.lock:
+            lst = self.lists.get(lid)
+            if lst is None or not (0 <= index < len(lst["tracks"])):
+                return False
+            if version is None:
+                lst["tracks"][index].pop("version", None)  # clear override
+            else:
+                lst["tracks"][index]["version"] = int(version)
+            self._save()
+            return True
+
+    def set_default_random(self, lid) -> bool:
+        with self.lock:
+            if lid is not None and lid not in self.lists:
+                return False
+            self.default_random = lid
+            self._save()
+            return True
+
+
 class Stats:
     """Append-only party history (stats.jsonl): one JSON line per event
     (queued / started / completed / skipped / removed / session_reset).
@@ -419,6 +590,117 @@ def move_singer(singers: list, name: str, direction: int) -> bool:
     return True
 
 
+def random_song(songs: dict, exclude: set) -> str | None:
+    """Uniform-random song id not in `exclude` (song ids already queued or on
+    stage). Falls back to the full library if excluding everything would leave
+    nothing, so the button never dead-ends on a small/fully-queued library."""
+    pool = [sid for sid in songs if sid not in exclude]
+    if not pool:
+        pool = list(songs)
+    return random.choice(pool) if pool else None
+
+
+def locked_count(num_singers: int, lock_percent: int) -> int:
+    """How many singers at the top of the rotation are locked against being
+    bumped by newcomers: round(lock_percent% of the count), but always at least
+    the up-next slot, and never more than everyone."""
+    if num_singers <= 0:
+        return 0
+    return max(1, min(round(lock_percent / 100 * num_singers), num_singers))
+
+
+# --------------------------------------------------------------------------
+# Musical key -> pre-song reference tone (#15). song-sorter's Key-detect writes
+# an optional canonical `key` ("<Tonic> <major|minor>", sharps) plus a
+# `key_confidence` / `key_source` into index.json; we turn that into a short
+# tonic triad the screen sounds during the countdown.
+
+KEY_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+_FLAT_ALIASES = {"Db": "C#", "Eb": "D#", "Fb": "E", "Gb": "F#", "Ab": "G#",
+                 "Bb": "A#", "Cb": "B"}
+
+
+def parse_key(key) -> tuple | None:
+    """Canonical '<Tonic> <major|minor>' -> (pitch_class, mode), else None.
+    Flat spellings are tolerated in case an index.json is hand-authored."""
+    if not isinstance(key, str):
+        return None
+    parts = key.strip().split()
+    if len(parts) != 2:
+        return None
+    tonic = parts[0][:1].upper() + parts[0][1:].lower()
+    tonic = _FLAT_ALIASES.get(tonic, tonic)
+    mode = parts[1].lower()
+    if mode not in ("major", "minor") or tonic not in KEY_NAMES:
+        return None
+    return KEY_NAMES.index(tonic), mode
+
+
+def key_tone_hz(key) -> list | None:
+    """Key -> the three reference frequencies (tonic, third, fifth) in a
+    comfortable mid-vocal octave (C4-B4), or None if the key won't parse. A
+    triad orients a singer better than a lone note, and the third carries the
+    major/minor colour. NB this is the key's tonic, not necessarily the song's
+    first sung note -- an approximation we're honest about on screen."""
+    parsed = parse_key(key)
+    if parsed is None:
+        return None
+    idx, mode = parsed
+    root = 60 + idx                      # MIDI C4..B4
+    third = root + (3 if mode == "minor" else 4)
+    return [round(440.0 * 2 ** ((n - 69) / 12.0), 2)
+            for n in (root, third, root + 7)]
+
+
+def key_fields(src: dict) -> dict:
+    """Key fields for ONE playable copy, read from an index.json entry (either
+    the song entry or one of its `versions[]`), or {}. song-sorter publishes
+    these only when they clear its confidence gate, so presence is meaningful."""
+    if not src.get("key"):
+        return {}
+    try:
+        conf = float(src.get("key_confidence") or 0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    out = {"key": src["key"], "key_confidence": conf,
+           "key_source": src.get("key_source", "")}
+    if src.get("key_camelot"):
+        out["key_camelot"] = src["key_camelot"]
+    return out
+
+
+def version_key(song: dict, ver: int) -> dict:
+    """Key fields for the copy actually being played, or {}. Every copy is keyed
+    independently -- alternate rips from different karaoke brands are frequently
+    transposed -- so an alternate with no key of its own yields nothing rather
+    than borrowing the best copy's and handing the singer a wrong note."""
+    vlist = song.get("versions") or []
+    src = vlist[ver] if 0 <= ver < len(vlist) else song
+    return key_fields(src)
+
+
+def key_trusted(source: str, confidence, min_confidence: float) -> bool:
+    """Whether a library key is solid enough to sound out loud. Mirrors
+    song-sorter's own rule: a curated or ID3-tagged key is taken at its word;
+    machine estimates (auto/online) must clear the KJ's floor. A wrong key is
+    worse than no key, so anything unparseable fails closed."""
+    if source in ("auto", "online"):
+        try:
+            return float(confidence) >= min_confidence
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def random_pool_track(tracks: list, songs: dict, exclude: set):
+    """Pick a random track from a KJ pool list whose song is in the library and
+    not already queued; fall back to any in-library track. Returns the track
+    dict (song_id + optional version) or None."""
+    valid = [t for t in tracks if t.get("song_id") in songs]
+    cands = [t for t in valid if t["song_id"] not in exclude] or valid
+    return random.choice(cands) if cands else None
+
+
 class State:
     """All mutable party state, guarded by one lock, journaled to disk."""
 
@@ -436,11 +718,26 @@ class State:
         self.transport = {"cmd": "play", "seq": 0}
         self.versions = None             # VersionStore, attached in main();
                                          # snapshots show each song's active pick
+        self.kj_random_fn = None         # callable -> bool: is a Random-KJ pool
+                                         # available? attached in make_handler
+        self.key_tone_fn = None          # callable(song, singer, version) -> the
+                                         # pre-song key/tone payload, or None
         self.next_entry_id = 1
         # The locked "up next" slot: entry id, or None. Once someone is
         # projected next they stay next -- people plan around it (see UAT).
         # Passive queue adds can never displace it; KJ reorders reset it.
         self.pinned: int | None = None
+        # KJ hand-arranged prefix of the play order: a sticky list of entry ids
+        # the KJ nudged up/down. Honored ahead of the round-robin WITHOUT
+        # touching singer rotation or per-singer FIFO; drained as entries play
+        # or leave the queue. See move_in_order / rotation_preview.
+        self.manual_order: list[int] = []
+        # Fair-queue bookkeeping (this session): singers who have started a song
+        # (veterans -- everyone else is a "newbie" due a first-song boost), and
+        # how many times each waiting veteran has been bumped by newcomers. Both
+        # reset when a singer takes their turn, and on session reset.
+        self.performed: list[str] = []
+        self.bumps: dict[str, int] = {}
         # Intermission hold: seconds left on a FROZEN countdown, or None when
         # it is running. Set while the KJ has Pause down or the queue is
         # empty; the tick loop owns the transitions (see Flow.tick_once).
@@ -455,8 +752,9 @@ class State:
             d = json.loads(self.path.read_text(encoding="utf-8"))
         except (ValueError, OSError):
             return
-        for k in ("singers", "queue", "cursor", "now", "phase",
-                  "deadline", "transport", "next_entry_id", "pinned"):
+        for k in ("singers", "queue", "cursor", "now", "phase", "deadline",
+                  "transport", "next_entry_id", "pinned", "manual_order",
+                  "performed", "bumps"):
             if k in d:
                 setattr(self, k, d[k])
         # A power failure mid-song resumes at the intermission board rather
@@ -471,8 +769,9 @@ class State:
 
     def _save(self) -> None:
         d = {k: getattr(self, k) for k in
-             ("singers", "queue", "cursor", "now", "phase",
-              "deadline", "transport", "next_entry_id", "pinned")}
+             ("singers", "queue", "cursor", "now", "phase", "deadline",
+              "transport", "next_entry_id", "pinned", "manual_order",
+              "performed", "bumps")}
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(d, indent=1), encoding="utf-8")
         os.replace(tmp, self.path)
@@ -496,9 +795,14 @@ class State:
             self._broadcast(songs)
 
     def _reconcile_pin(self) -> None:
-        """Drop a pin whose entry left the queue; when unpinned, lock in
-        whoever is projected next RIGHT NOW (first projection wins -- later
-        queue adds must not displace an announced next singer)."""
+        """Reconcile the manual play-order and the up-next pin after any
+        mutation. Manual bumps whose entries left the queue are dropped; a pin
+        whose entry left is dropped; when unpinned, lock in whoever is projected
+        next RIGHT NOW (first projection wins -- later queue adds must not
+        displace an announced next singer)."""
+        if self.manual_order:
+            live = {e["id"] for e in self.queue}
+            self.manual_order = [i for i in self.manual_order if i in live]
         if self.pinned is not None and \
                 not any(e["id"] == self.pinned for e in self.queue):
             self.pinned = None
@@ -509,18 +813,28 @@ class State:
 
     # -- views ---------------------------------------------------------------
     def rotation_preview(self, limit: int = 12) -> list:
-        """Upcoming (singer, entry) order, simulated without mutating. A
-        pinned entry is always first; the simulation continues from the
-        rotation slot after its singer, so only the tail stays fluid."""
+        """Upcoming (singer, entry) order, simulated without mutating. The KJ's
+        manual bumps come first (in order), then the up-next pin, then the
+        round-robin tail continues from the slot after the last fixed singer --
+        so only the tail stays fluid."""
         entries = list(self.queue)
+        by_id = {e["id"]: e for e in entries}
         cursor = self.cursor
         out = []
-        pin = next((e for e in entries if e["id"] == self.pinned), None)
-        if pin is not None:
-            entries.remove(pin)
-            out.append(pin)
-            if pin["singer"] in self.singers:
-                cursor = (self.singers.index(pin["singer"]) + 1) % len(self.singers)
+        # fixed prefix: manual bumps in order, then the pin if not already there
+        prefix = list(self.manual_order)
+        if self.pinned is not None and self.pinned not in prefix:
+            prefix.append(self.pinned)
+        for eid in prefix:
+            e = by_id.get(eid)
+            if e is None or e not in entries:
+                continue
+            entries.remove(e)
+            out.append(e)
+            if e["singer"] in self.singers:
+                cursor = (self.singers.index(e["singer"]) + 1) % len(self.singers)
+            if len(out) >= limit:
+                return out[:limit]
         while len(out) < limit:
             e, cursor = pick_next(self.singers, cursor, entries)
             if e is None:
@@ -529,6 +843,59 @@ class State:
             out.append(e)
         return out
 
+    def move_in_order(self, entry_id: int, direction: int) -> bool:
+        """Nudge one entry up (dir<0) or down (dir>0) one slot in the effective
+        play order and make it stick, WITHOUT touching singer rotation or
+        per-singer FIFO. Freezes the play order down to the swapped slot into
+        manual_order; entries below stay fluid. Returns True if it moved."""
+        order = [e["id"] for e in self.rotation_preview(limit=len(self.queue))]
+        if entry_id not in order:
+            return False
+        i = order.index(entry_id)
+        j = i + (1 if direction > 0 else -1)
+        if j < 0 or j >= len(order):
+            return False
+        order[i], order[j] = order[j], order[i]
+        self.manual_order = order[:max(i, j) + 1]
+        return True
+
+    def add_singer(self, name: str, cfg: dict) -> bool:
+        """Add a singer to the rotation. Returns True if newly added. With the
+        fair queue on, a NEWCOMER who hasn't sung this session slots in below the
+        locked top zone, ahead of bumpable veterans but behind waiting newbies
+        and anyone protected (locked or bump-capped). Veterans re-joining and the
+        fairness-off path just append. Bumped veterans' counts tick up here."""
+        if name in self.singers:
+            return False
+        newbie = name not in self.performed
+        if not cfg.get("fairness_enabled", True) or not self.singers or not newbie:
+            self.singers.append(name)
+            return True
+        # canonicalize so the rotation reads from index 0 -- lets us reason about
+        # positions as a plain list, no cursor wrap-around
+        line = self.singers[self.cursor:] + self.singers[:self.cursor]
+        self.cursor = 0
+        lock_n = locked_count(len(line), cfg.get("lock_percent", 33))
+        limit = cfg.get("bump_limit", 2)
+        performed = set(self.performed)
+        # highest slot the newcomer may take: after the locked zone, and after
+        # every waiting newbie or bump-capped veteran (barriers they must not
+        # jump); bumpable veterans are not barriers.
+        p = lock_n
+        for i in range(lock_n, len(line)):
+            s = line[i]
+            capped = s in performed and self.bumps.get(s, 0) >= limit
+            if s not in performed or capped:      # newbie or protected veteran
+                p = i + 1
+        # every bumpable veteran at or below the insertion slot is pushed down
+        for i in range(p, len(line)):
+            s = line[i]
+            if s in performed and self.bumps.get(s, 0) < limit:
+                self.bumps[s] = self.bumps.get(s, 0) + 1
+        line.insert(p, name)
+        self.singers = line
+        return True
+
     def snapshot(self, songs: dict) -> dict:
         def song_view(e):
             s = songs.get(e["song_id"], {})
@@ -536,11 +903,19 @@ class State:
             row = {"id": e["id"], "singer": e["singer"], "song_id": e["song_id"],
                    "artist": s.get("artist", "?"), "title": s.get("title", "?"),
                    "duration": s.get("duration"), "nversions": nv}
+            # effective version: a per-entry override wins over the global pick
+            ev = e.get("version")
+            eff = ev if ev is not None else (
+                self.versions.get(e["song_id"]) if self.versions is not None else 0)
+            eff = eff if isinstance(eff, int) and 0 <= eff < max(nv, 1) else 0
             if nv > 1 and self.versions is not None:
-                idx = self.versions.get(e["song_id"])
-                # 1-based for display (v1 = best); out-of-range picks fall back
-                # to the default, mirroring _media_path
-                row["vsel"] = (idx if 0 <= idx < nv else 0) + 1
+                row["vsel"] = eff + 1  # 1-based for display (v1 = best)
+                if ev is not None:
+                    row["ver"] = eff   # 0-based; the screen requests ?v=this
+            if self.key_tone_fn is not None:
+                kt = self.key_tone_fn(s, e["singer"], eff)
+                if kt:
+                    row.update(kt)     # key / key_camelot / key_tone / tone_hz
             return row
         with self.lock:
             up = self.rotation_preview()
@@ -555,9 +930,14 @@ class State:
                 "singers": list(self.singers),
                 "transport": dict(self.transport),
                 "pinned": self.pinned,
+                "manual_order": list(self.manual_order),
+                "performed": list(self.performed),
+                "bumps": dict(self.bumps),
                 "held": self.hold_remaining is not None,
                 "hold_remaining": self.hold_remaining,
             }
+            if self.kj_random_fn is not None:
+                out["kj_random"] = self.kj_random_fn()  # is a KJ pool available?
             out.update(self.extra)
             return out
 
@@ -593,6 +973,9 @@ class Flow:
             st.queue.remove(e)
             st.pinned = None  # consumed; mutate() re-pins the new next
             st.now = e
+            if e["singer"] not in st.performed:  # they've now sung this session
+                st.performed.append(e["singer"])
+            st.bumps.pop(e["singer"], None)      # fresh start for their next wait
             st.phase = "playing"
             st.hold_remaining = None
             st.transport = {"cmd": "play", "seq": st.transport["seq"] + 1}
@@ -739,7 +1122,8 @@ _PLACEHOLDER = ("<!DOCTYPE html><meta charset='utf-8'><title>KriticalDJ</title>"
 
 
 def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flow,
-                 registry: SingerRegistry, stats: Stats, versions: VersionStore):
+                 registry: SingerRegistry, stats: Stats, versions: VersionStore,
+                 lists: "ListStore", prefs: "SingerPrefs"):
     media_cache = ROOT / ".media-cache"
     static_dir = ROOT / "static"
     # search order fixed once; sorting 50k+ rows per request would sting on a Pi
@@ -751,6 +1135,39 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
     # this just keeps guests off the console, not a hardened auth system.
     sessions: set = set()
     sess_lock = threading.Lock()
+    # live "is a Random-KJ pool available?" flag, surfaced in every snapshot so
+    # the songbook button can enable/disable itself
+    state.kj_random_fn = lambda: bool(
+        lists.default_random and lists.default_random in lists.lists
+        and any(t.get("song_id") in songs
+                for t in lists.lists[lists.default_random].get("tracks", [])))
+
+    def _key_tone(song: dict, singer: str, ver: int):
+        """Pre-song key payload for one queue entry, or None (stay silent).
+        Silent unless: the feature is on, the copy THIS entry will actually play
+        carries a key we trust (each copy is keyed independently, so an
+        alternate never borrows the best copy's), and the singer hasn't opted
+        out. Anything short of that stays quiet -- a wrong key is worse none."""
+        if not cfg.get("key_tone_enabled", True):
+            return None
+        kf = version_key(song, ver)
+        key = kf.get("key")
+        if not key:
+            return None
+        floor = int(cfg.get("key_tone_min_confidence", 50)) / 100.0
+        if not key_trusted(kf.get("key_source", ""),
+                           kf.get("key_confidence", 0), floor):
+            return None
+        hz = key_tone_hz(key)
+        if not hz:
+            return None
+        if not prefs.get(registry.lookup(singer), "key_tone", True):
+            return None
+        out = {"key": key, "key_tone": True, "tone_hz": hz}
+        if kf.get("key_camelot"):
+            out["key_camelot"] = kf["key_camelot"]
+        return out
+    state.key_tone_fn = _key_tone
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -803,16 +1220,17 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 return None
 
         # ---- media -------------------------------------------------------
-        def _media_path(self, song_id: str, kind: str) -> Path | None:
+        def _media_path(self, song_id: str, kind: str, ver=None) -> Path | None:
             s = songs.get(song_id)
             if not s or kind not in ("mp3", "cdg"):
                 return None
-            # Resolve the active version. Version 0 reads the primary keys off
-            # the song dict itself (identical to the pre-multi-version path);
-            # an alternate reads from its own media dict with a per-version
-            # cache key so extractions never collide.
+            # Resolve the active version. An explicit `ver` (a queue entry's
+            # per-entry override) wins; otherwise the KJ's global pick. Version 0
+            # reads the primary keys off the song dict itself (identical to the
+            # pre-multi-version path); an alternate reads from its own media dict
+            # with a per-version cache key so extractions never collide.
             vlist = s.get("versions") or []
-            idx = versions.get(song_id)
+            idx = ver if ver is not None else versions.get(song_id)
             if 0 < idx < len(vlist):
                 v, cache_key = vlist[idx], f"{song_id}.v{idx}"
             else:
@@ -924,12 +1342,20 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
             parts = [p for p in u.path.split("/") if p]
             if u.path == "/":
                 return self._page("singer.html", "Singer")
+            if u.path == "/kj/lists":  # operator list-moderation surface
+                if not self._authed():
+                    return self._page("kjlogin.html", "Locked")
+                return self._page("kjlists.html", "Lists")
             if u.path in ("/kj", "/setup"):
                 # operator surfaces: show the PIN gate until a valid session
                 if not self._authed():
                     return self._page("kjlogin.html", "Locked")
                 return self._page("kj.html" if u.path == "/kj" else "setup.html",
                                    "KJ console")
+            if u.path == "/kiosk":
+                # shared walk-up songbook (no personal identity); default QR
+                # still points at "/" so BYOD phones keep the normal singer UI
+                return self._page("kiosk.html", "Songbook")
             if u.path == "/screen":
                 return self._page("screen.html", "Screen")
             if len(parts) == 2 and parts[0] == "static":
@@ -954,7 +1380,12 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                                    "port": cfg["port"],
                                    "intermission_seconds": cfg["intermission_seconds"],
                                    "start_now_countdown_seconds": cfg["start_now_countdown_seconds"],
-                                   "lyrics_offset_ms": cfg["lyrics_offset_ms"]})
+                                   "lyrics_offset_ms": cfg["lyrics_offset_ms"],
+                                   "fairness_enabled": cfg.get("fairness_enabled", True),
+                                   "lock_percent": cfg.get("lock_percent", 33),
+                                   "bump_limit": cfg.get("bump_limit", 2),
+                                   "key_tone_enabled": cfg.get("key_tone_enabled", True),
+                                   "key_tone_min_confidence": cfg.get("key_tone_min_confidence", 50)})
             if u.path == "/api/stats/summary":
                 played, queued, singers_c = Counter(), Counter(), Counter()
                 events = resets = 0
@@ -994,6 +1425,60 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                                   "duration": v.get("duration")}
                                  for i, v in enumerate(vlist)],
                 })
+            if u.path == "/api/lists":
+                # a singer's own saved lists, tracks resolved for display
+                who = parse_qs(u.query).get("singer", [""])[0].strip().casefold()
+                out = []
+                for lid, l in lists.lists.items():
+                    if not who or l.get("owner_name", "").casefold() != who:
+                        continue
+                    tracks = []
+                    for t in l.get("tracks", []):
+                        s = songs.get(t.get("song_id"), {})
+                        nv = len(s.get("versions") or [])
+                        row = {"song_id": t.get("song_id"),
+                               "artist": s.get("artist", "?"),
+                               "title": s.get("title", "?"), "nversions": nv}
+                        if "version" in t:
+                            row["version"] = t["version"]
+                        if nv > 1:
+                            row["versions"] = [
+                                {"index": i, "label": v.get("label", f"Version {i + 1}")}
+                                for i, v in enumerate(s.get("versions") or [])]
+                        tracks.append(row)
+                    out.append({"id": lid, "name": l.get("name", ""),
+                                "owner_name": l.get("owner_name", ""),
+                                "created": l.get("created", 0), "tracks": tracks})
+                out.sort(key=lambda x: x["created"])
+                return self._json({"lists": out})
+            if u.path == "/api/prefs":
+                # a singer's own settings; lookup never mints a phantom singer
+                who = parse_qs(u.query).get("singer", [""])[0]
+                return self._json({
+                    "key_tone": prefs.get(registry.lookup(who), "key_tone", True),
+                    "key_tone_enabled": bool(cfg.get("key_tone_enabled", True)),
+                })
+            if u.path == "/api/kj/lists":  # moderation view: everyone's lists
+                if not self._authed():
+                    return self._json({"error": "auth required"}, 401)
+                out = []
+                for lid, l in lists.lists.items():
+                    tracks = []
+                    for t in l.get("tracks", []):
+                        s = songs.get(t.get("song_id"), {})
+                        row = {"artist": s.get("artist", "?"),
+                               "title": s.get("title", "?")}
+                        if "version" in t:
+                            vlist = s.get("versions") or []
+                            row["version"] = t["version"]
+                            if 0 <= t["version"] < len(vlist):
+                                row["version_label"] = vlist[t["version"]].get("label", "")
+                        tracks.append(row)
+                    out.append({"id": lid, "name": l.get("name", ""),
+                                "owner_name": l.get("owner_name", ""),
+                                "created": l.get("created", 0), "tracks": tracks})
+                out.sort(key=lambda x: (x["owner_name"].lower(), x["created"]))
+                return self._json({"default_random": lists.default_random, "lists": out})
             if u.path == "/api/songs":
                 qs = parse_qs(u.query)
                 toks = _searchable(" ".join(qs.get("q", [""]))).split()
@@ -1013,7 +1498,12 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                                     "title": s["title"], "duration": s.get("duration")})
                 return self._json({"total": total, "songs": out})
             if len(parts) == 3 and parts[0] == "media":
-                p = self._media_path(parts[1], parts[2])
+                vq = parse_qs(u.query).get("v", [None])[0]  # per-entry version
+                try:
+                    ver = int(vq) if vq is not None else None
+                except ValueError:
+                    ver = None
+                p = self._media_path(parts[1], parts[2], ver)
                 if p and p.exists():
                     ctype = "audio/mpeg" if parts[2] == "mp3" else "application/octet-stream"
                     return self._serve_file(p, ctype)
@@ -1058,8 +1548,7 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 name, _sid = registry.resolve(raw)  # canonical casing, stable id
 
                 def fn():
-                    if name not in state.singers:
-                        state.singers.append(name)
+                    state.add_singer(name, cfg)
                 state.mutate(songs, fn)
                 return self._json({"ok": True, "name": name, "singers": state.singers})
             if u.path == "/api/queue":
@@ -1068,16 +1557,184 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 if sid not in songs or not raw:
                     return self._json({"error": "song_id and singer required"}, 400)
                 singer, _ = registry.resolve(raw)
+                # optional per-entry version override (e.g. a saved-list duet
+                # pick); ignored unless it's a valid index for this song
+                ver = self._int_arg(body, "version")
+                nv = len(songs[sid].get("versions") or [])
+                override = ver if (ver is not None and 0 <= ver < nv) else None
 
                 def fn():
-                    if singer not in state.singers:
-                        state.singers.append(singer)
-                    state.queue.append({"id": state.next_entry_id,
-                                        "singer": singer, "song_id": sid})
+                    state.add_singer(singer, cfg)
+                    entry = {"id": state.next_entry_id, "singer": singer,
+                             "song_id": sid}
+                    if override is not None:
+                        entry["version"] = override
+                    state.queue.append(entry)
                     state.next_entry_id += 1
                 state.mutate(songs, fn)
                 stats.log("queued", singer, flow._info(sid))
                 return self._json({"ok": True})
+            if u.path == "/api/queue/random":
+                # songbook "surprise me": queue a random library song for the
+                # singer, skipping anything already queued or on stage so nobody
+                # gets a duplicate of what's already lined up.
+                raw = (body.get("singer") or "").strip()[:40]
+                if not raw:
+                    return self._json({"error": "singer required"}, 400)
+                singer, _ = registry.resolve(raw)
+                picked = []
+
+                def fn():
+                    exclude = {e["song_id"] for e in state.queue}
+                    if state.now:
+                        exclude.add(state.now["song_id"])
+                    sid = random_song(songs, exclude)
+                    if sid is None:
+                        return
+                    state.add_singer(singer, cfg)
+                    state.queue.append({"id": state.next_entry_id,
+                                        "singer": singer, "song_id": sid})
+                    state.next_entry_id += 1
+                    picked.append(sid)
+                state.mutate(songs, fn)
+                if not picked:
+                    return self._json({"error": "no songs available"}, 400)
+                sid = picked[0]
+                stats.log("queued", singer, flow._info(sid))
+                s = songs.get(sid, {})
+                return self._json({"ok": True, "song_id": sid,
+                                   "artist": s.get("artist", "?"),
+                                   "title": s.get("title", "?")})
+            if u.path == "/api/queue/random_kj":
+                # like Random Song, but draws from the KJ's designated pool list
+                # and honors each track's per-list version override
+                raw = (body.get("singer") or "").strip()[:40]
+                if not raw:
+                    return self._json({"error": "singer required"}, 400)
+                dr = lists.default_random
+                pool = lists.lists.get(dr) if dr else None
+                if not pool or not pool.get("tracks"):
+                    return self._json({"error": "no KJ pool set"}, 400)
+                singer, _ = registry.resolve(raw)
+                picked = []
+
+                def fn():
+                    exclude = {e["song_id"] for e in state.queue}
+                    if state.now:
+                        exclude.add(state.now["song_id"])
+                    t = random_pool_track(pool["tracks"], songs, exclude)
+                    if t is None:
+                        return
+                    sid = t["song_id"]
+                    state.add_singer(singer, cfg)
+                    entry = {"id": state.next_entry_id, "singer": singer,
+                             "song_id": sid}
+                    v = t.get("version")
+                    nv = len(songs[sid].get("versions") or [])
+                    if v is not None and 0 <= v < nv:
+                        entry["version"] = v
+                    state.queue.append(entry)
+                    state.next_entry_id += 1
+                    picked.append(sid)
+                state.mutate(songs, fn)
+                if not picked:
+                    return self._json({"error": "no songs available"}, 400)
+                sid = picked[0]
+                stats.log("queued", singer, flow._info(sid))
+                s = songs.get(sid, {})
+                return self._json({"ok": True, "song_id": sid,
+                                   "artist": s.get("artist", "?"),
+                                   "title": s.get("title", "?")})
+            if u.path == "/api/prefs":
+                raw = (body.get("singer") or "").strip()[:40]
+                if not raw:
+                    return self._json({"error": "singer required"}, 400)
+                _name, sid = registry.resolve(raw)
+                if "key_tone" in body:
+                    prefs.set(sid, "key_tone", bool(body.get("key_tone")))
+                # nudge the surfaces so /screen picks the change up immediately
+                state.mutate(songs, lambda: None)
+                return self._json({"ok": True,
+                                   "key_tone": prefs.get(sid, "key_tone", True)})
+            if u.path == "/api/lists":  # create a new saved list
+                raw = (body.get("singer") or "").strip()[:40]
+                name = (body.get("name") or "").strip()[:60]
+                if not raw or not name:
+                    return self._json({"error": "name and singer required"}, 400)
+                owner, oid = registry.resolve(raw)
+                return self._json({"ok": True, "id": lists.create(name, owner, oid)})
+            if u.path.startswith("/api/lists/"):
+                lp = [p for p in u.path.split("/") if p]  # api lists <id> <action>
+                if len(lp) != 4:
+                    return self._json({"error": "not found"}, 404)
+                lid, action = lp[2], lp[3]
+                lst = lists.lists.get(lid)
+                if lst is None:
+                    return self._json({"error": "unknown list"}, 404)
+                raw = (body.get("singer") or "").strip()[:40]
+                if action == "queue":
+                    # load the whole list into the singer's queue, applying each
+                    # track's per-list version override via the C6 entry version
+                    if not raw:
+                        return self._json({"error": "singer required"}, 400)
+                    singer, _ = registry.resolve(raw)
+                    queued = []
+
+                    def fn():
+                        for t in lst["tracks"]:
+                            sid = t.get("song_id")
+                            if sid not in songs:
+                                continue
+                            state.add_singer(singer, cfg)
+                            entry = {"id": state.next_entry_id, "singer": singer,
+                                     "song_id": sid}
+                            v = t.get("version")
+                            nv = len(songs[sid].get("versions") or [])
+                            if v is not None and 0 <= v < nv:
+                                entry["version"] = v
+                            state.queue.append(entry)
+                            state.next_entry_id += 1
+                            queued.append(sid)
+                    state.mutate(songs, fn)
+                    for sid in queued:
+                        stats.log("queued", singer, flow._info(sid))
+                    return self._json({"ok": True, "queued": len(queued)})
+                # editing actions require ownership (honor-system name match)
+                if raw.casefold() != lst.get("owner_name", "").casefold():
+                    return self._json({"error": "not your list"}, 403)
+                if action == "rename":
+                    nm = (body.get("name") or "").strip()[:60]
+                    if not nm:
+                        return self._json({"error": "name required"}, 400)
+                    return self._json({"ok": lists.rename(lid, nm)})
+                if action == "delete":
+                    return self._json({"ok": lists.delete(lid)})
+                if action == "add":
+                    sid = body.get("song_id")
+                    if sid not in songs:
+                        return self._json({"error": "unknown song"}, 400)
+                    ver = self._int_arg(body, "version")
+                    nv = len(songs[sid].get("versions") or [])
+                    v = ver if (ver is not None and 0 <= ver < nv) else None
+                    return self._json({"ok": lists.add_track(lid, sid, v)})
+                if action == "remove":
+                    idx = self._int_arg(body, "index")
+                    if idx is None:
+                        return self._json({"error": "index must be a number"}, 400)
+                    return self._json({"ok": lists.remove_track(lid, idx)})
+                if action == "set_version":
+                    idx = self._int_arg(body, "index")
+                    if idx is None:
+                        return self._json({"error": "index must be a number"}, 400)
+                    ver = self._int_arg(body, "version")  # None -> clear override
+                    v = None
+                    tracks = lst.get("tracks", [])
+                    if 0 <= idx < len(tracks):
+                        sid = tracks[idx].get("song_id")
+                        nv = len(songs.get(sid, {}).get("versions") or [])
+                        v = ver if (ver is not None and 0 <= ver < nv) else None
+                    return self._json({"ok": lists.set_track_version(lid, idx, v)})
+                return self._json({"error": "unknown action"}, 400)
             if u.path == "/api/screen/ended":
                 flow.song_ended()
                 return self._json({"ok": True})
@@ -1104,6 +1761,19 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                     moved.append(move_entry(state.queue, eid, direction))
                     if moved[0]:  # KJ reorder overrides the up-next lock
                         state.pinned = None
+                state.mutate(songs, fn)
+                return self._json({"ok": moved[0]})
+            if u.path == "/api/kj/queue_move":
+                # one-off sticky nudge of an entry in the effective play order;
+                # does not touch singer rotation or per-singer FIFO
+                eid = self._int_arg(body, "entry_id")
+                direction = self._int_arg(body, "dir")
+                if eid is None or direction is None:
+                    return self._json({"error": "entry_id and dir must be numbers"}, 400)
+                moved = []
+
+                def fn():
+                    moved.append(state.move_in_order(eid, direction))
                 state.mutate(songs, fn)
                 return self._json({"ok": moved[0]})
             if u.path == "/api/kj/singer_move":
@@ -1140,6 +1810,9 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                     state.cursor = 0
                     state.now = None
                     state.pinned = None
+                    state.manual_order = []
+                    state.performed = []
+                    state.bumps = {}
                     state.phase = "idle"
                     state.deadline = 0.0
                     state.hold_remaining = None
@@ -1219,6 +1892,26 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 # nudge the surfaces so a version swap shows up live
                 state.mutate(songs, lambda: None)
                 return self._json({"ok": True, "song_id": sid, "active": idx})
+            if u.path == "/api/kj/list/default":
+                # tag (or clear, with a null/blank id) the Random-KJ pool list
+                lid = body.get("list_id") or None
+                ok = lists.set_default_random(lid)
+                state.mutate(songs, lambda: None)  # push new availability live
+                return self._json({"ok": ok,
+                                   "default_random": lists.default_random})
+            if u.path.startswith("/api/kj/list/"):
+                lp = [p for p in u.path.split("/") if p]  # api kj list <id> <action>
+                if len(lp) != 5:
+                    return self._json({"error": "not found"}, 404)
+                lid, action = lp[3], lp[4]
+                if action == "delete":  # KJ override: delete anyone's list
+                    return self._json({"ok": lists.delete(lid)})
+                if action == "rename":
+                    nm = (body.get("name") or "").strip()[:60]
+                    if not nm:
+                        return self._json({"error": "name required"}, 400)
+                    return self._json({"ok": lists.rename(lid, nm)})
+                return self._json({"error": "unknown action"}, 400)
             if u.path.startswith("/api/kj/"):
                 cmd = u.path.rsplit("/", 1)[1]
                 if cmd in ("play", "pause"):
@@ -1269,11 +1962,14 @@ def main() -> None:
     stats = Stats(ROOT / "stats.jsonl", registry)
     versions = VersionStore(ROOT / "versions.json")
     state.versions = versions  # snapshots surface each song's active pick
+    lists = ListStore(ROOT / "lists.json")
+    prefs = SingerPrefs(ROOT / "prefs.json")
     flow = Flow(state, songs, cfg, stats)
     threading.Thread(target=flow.tick_forever, daemon=True).start()
     server = ThreadingHTTPServer((cfg["host"], cfg["port"]),
                                  make_handler(cfg, cfg_path, state, songs, flow,
-                                              registry, stats, versions))
+                                              registry, stats, versions, lists,
+                                              prefs))
     server.daemon_threads = True
     print(f"[{APP}] singers: {lan_url(cfg)}  |  KJ: {lan_url(cfg)}kj  |  screen: {lan_url(cfg)}screen")
     server.serve_forever()

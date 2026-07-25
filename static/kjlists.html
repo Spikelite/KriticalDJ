@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Saved Lists</title>
+<style>
+:root{--bg:#14161a;--panel:#1e2128;--text:#e8eaed;--dim:#9aa0a6;--accent:#4fc3f7;--ok:#7bd88f;--warn:#e57373;--line:#22252c;--star:#f5c451}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,Arial,sans-serif;max-width:760px;margin:0 auto;padding:0 16px}
+header{padding:14px 0;display:flex;align-items:baseline}
+h1{font-size:19px;margin:0}
+header a{margin-left:auto;font-size:14px;color:var(--accent);text-decoration:none}
+header a+a{margin-left:16px}
+.intro{font-size:14px;color:var(--dim);margin:0 0 8px}
+.intro b{color:var(--star)}
+.owner{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;margin:16px 0 4px}
+.card{background:var(--panel);border:1px solid #2a2e36;border-radius:10px;margin-bottom:8px;overflow:hidden}
+.card.pool{border-color:var(--star)}
+.chead{display:flex;align-items:center;gap:8px;padding:10px 12px;flex-wrap:wrap}
+.chead .nm{font-size:16px;font-weight:600}
+.chead .ct{color:var(--dim);font-size:13px;margin-right:auto}
+.chead button{font-size:13px;padding:5px 11px;border-radius:8px;border:1px solid #3a3f47;background:var(--bg);color:var(--text);cursor:pointer}
+.chead button.star{border-color:var(--star);color:var(--star)}
+.chead button.star.on{background:var(--star);color:#241c04;font-weight:700}
+.chead button.del{color:var(--warn)}
+.tracks{padding:0 12px 10px 12px;font-size:14px}
+.tracks .t{padding:5px 0;border-top:1px solid var(--line);color:var(--dim)}
+.tracks .t b{color:var(--text);font-weight:500}
+.tracks .t .v{color:var(--star);font-size:12px;margin-left:6px}
+.tracks .empty{color:var(--dim);padding:5px 0}
+.toggle{font-size:12px;color:var(--accent);cursor:pointer;background:none;border:none;padding:0}
+#empty{color:var(--dim);font-size:14px;padding:20px 0}
+#msg{color:var(--ok);font-size:14px;min-height:18px;margin:8px 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>Saved Lists <span id="party" style="color:var(--dim);font-size:14px;font-weight:normal"></span></h1>
+  <a href="/kj">&larr; KJ Console</a>
+  <a href="#" onclick="logout();return false">&#128274; Lock</a>
+</header>
+<p class="intro">Singers' saved lists. Tag one as the <b>&#9733; random pool</b> that the songbook's
+&ldquo;Random KJ Song&rdquo; button draws from. Rename or delete any list.</p>
+<div id="msg"></div>
+<div id="lists"></div>
+<div id="empty" style="display:none">No saved lists yet &mdash; singers create these from the songbook.</div>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let DEFAULT = null, EXPANDED = {};
+function logout(){ fetch("/api/kj/logout",{method:"POST"}).then(()=>location.href="/kj"); }
+fetch("/api/config").then(r=>r.json()).then(c=>{ $("party").textContent = c.party_name; });
+
+function msg(t){ $("msg").textContent = t; }
+function mkb(txt,fn,cls){ const b=document.createElement("button"); b.type="button"; b.textContent=txt; if(cls)b.className=cls; b.onclick=fn; return b; }
+
+function load(){
+  fetch("/api/kj/lists").then(r=>r.json()).then(d=>{
+    DEFAULT = d.default_random;
+    const box=$("lists"); box.textContent="";
+    const rows = d.lists||[];
+    $("empty").style.display = rows.length ? "none" : "block";
+    let owner = null;
+    for(const L of rows){
+      if(L.owner_name !== owner){
+        owner = L.owner_name;
+        const h=document.createElement("div"); h.className="owner"; h.textContent=owner||"(unknown)"; box.appendChild(h);
+      }
+      const card=document.createElement("div"); card.className="card"+(L.id===DEFAULT?" pool":"");
+      const head=document.createElement("div"); head.className="chead";
+      const nm=document.createElement("span"); nm.className="nm"; nm.textContent=(L.id===DEFAULT?"★ ":"")+L.name; head.appendChild(nm);
+      const ct=document.createElement("span"); ct.className="ct";
+      ct.textContent=" "+L.tracks.length+" song"+(L.tracks.length===1?"":"s");
+      const tog=document.createElement("button"); tog.className="toggle";
+      tog.textContent=EXPANDED[L.id]?" hide":" show"; tog.onclick=()=>{ EXPANDED[L.id]=!EXPANDED[L.id]; load(); };
+      ct.appendChild(tog); head.appendChild(ct);
+      const isPool=L.id===DEFAULT;
+      head.appendChild(mkb(isPool?"★ Random pool":"☆ Set as pool",
+        ()=>setPool(isPool?null:L.id), "star"+(isPool?" on":"")));
+      head.appendChild(mkb("Rename",()=>renameList(L.id,L.name)));
+      head.appendChild(mkb("Delete",()=>delList(L.id,L.name),"del"));
+      card.appendChild(head);
+      if(EXPANDED[L.id]){
+        const tb=document.createElement("div"); tb.className="tracks";
+        if(!L.tracks.length){ const e=document.createElement("div"); e.className="empty"; e.textContent="Empty list."; tb.appendChild(e); }
+        L.tracks.forEach(t=>{
+          const row=document.createElement("div"); row.className="t";
+          const b=document.createElement("b"); b.textContent=t.title; row.appendChild(b);
+          row.appendChild(document.createTextNode(" — "+t.artist));
+          if(t.version!=null){ const v=document.createElement("span"); v.className="v";
+            v.textContent="♪ "+(t.version_label||("v"+(t.version+1))); row.appendChild(v); }
+          tb.appendChild(row);
+        });
+        card.appendChild(tb);
+      }
+      box.appendChild(card);
+    }
+  });
+}
+function setPool(id){
+  fetch("/api/kj/list/default",{method:"POST",body:JSON.stringify({list_id:id})})
+    .then(r=>r.json()).then(d=>{ msg(id? "Random pool set." : "Random pool cleared."); load(); });
+}
+function renameList(id,cur){
+  const nm=prompt("Rename list:",cur); if(!nm||!nm.trim()) return;
+  fetch("/api/kj/list/"+id+"/rename",{method:"POST",body:JSON.stringify({name:nm.trim()})}).then(()=>{ msg("Renamed."); load(); });
+}
+function delList(id,nm){
+  if(!confirm("Delete \""+nm+"\"? This can't be undone.")) return;
+  fetch("/api/kj/list/"+id+"/delete",{method:"POST"}).then(()=>{ msg("Deleted."); delete EXPANDED[id]; load(); });
+}
+load();
+</script>
+</body>
+</html>
