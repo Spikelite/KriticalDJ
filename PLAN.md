@@ -80,6 +80,12 @@ folder scan otherwise. Small task on each side (song-sorter: extend
 | `intermission_seconds` | `15` | pause between songs |
 | `start_now_countdown_seconds` | `3` | KJ "start now" countdown |
 | `public_url` | `""` (auto) | URL encoded in the QR code |
+| `kj_pin` | `"0000"` | 4-digit gate for `/kj`, `/kj/lists`, `/setup` |
+| `fairness_enabled` | `true` | fair queue on/off (off = plain join-order) |
+| `lock_percent` | `33` | top % of singers newcomers cannot bump |
+| `bump_limit` | `2` | times a waiting veteran may be jumped |
+| `key_tone_enabled` | `true` | pre-song key reference tone (master switch) |
+| `key_tone_min_confidence` | `50` | % floor for machine-estimated keys |
 
 ## API sketch
 
@@ -100,7 +106,18 @@ folder scan otherwise. Small task on each side (song-sorter: extend
 - `POST /api/setup/config {key: value, ...}` — validated live config edit
 - `POST /api/kj/offset {"delta"}` — nudge lyrics_offset_ms (persisted + live)
 - `POST /api/screen/ended` — screen reports song finished
-- `GET /media/<song_id>/mp3|cdg` — media with HTTP Range support
+- `GET /media/<song_id>/mp3|cdg[?v=N]` — media with HTTP Range support; `v`
+  selects a per-entry version override
+- `POST /api/queue/random` — queue a random library song for a singer
+- `POST /api/queue/random_kj` — random song from the KJ's designated pool list
+- `POST /api/kj/queue_move {"entry_id","dir"}` — sticky nudge in the play order
+- `GET /api/lists?singer=` / `POST /api/lists {"singer","name"}` — saved lists
+- `POST /api/lists/<id>/{add,remove,set_version,rename,delete,queue}` — a
+  singer's own list (owner-guarded); `queue` loads it with version overrides
+- `GET /api/kj/lists` — moderation view (all lists + default random pool)
+- `POST /api/kj/list/default {"list_id"}` — tag the Random-KJ pool
+- `POST /api/kj/list/<id>/{rename,delete}` — KJ override on any list
+- `GET|POST /api/prefs {"singer","key_tone"}` — per-singer settings
 
 ## Phases
 
@@ -266,6 +283,73 @@ folder scan otherwise. Small task on each side (song-sorter: extend
       `start_now` / reset clear the hold. 4 new tests (28 total) + live
       smoke of every scenario incl. pause-wins-over-queue-add.
 
+- [x] **Phase 8 — UAT round 3** (branch `CAT-Feedback`, one commit per feature,
+      merged as a single PR). Six features from several days of many-user
+      testing, plus the deferred key tone. Each chunk ended compilable +
+      `python test_core.py` green; 28 -> 52 tests.
+      - [x] **C1 KJ Join-QR**: a header button opens an overlay with a large
+            scannable QR of the singer URL, so a walk-up can join mid-song with
+            the KJ's help. Costs no console space until summoned; reuses the
+            vendored `qrcode.js` and the version-modal pattern.
+      - [x] **C2 Random Song**: `POST /api/queue/random` picks a uniform library
+            song via `random_song(songs, exclude)`, skipping anything queued or
+            on stage, falling back to the full library so it never dead-ends.
+      - [x] **C3 public kiosk** (`/kiosk`): a shared walk-up songbook for people
+            without a phone. Pick singer -> pick song -> the selector RESETS, so
+            the next person picks themselves. No stored identity, no personal
+            position; a shared now/next strip instead. The default QR still
+            points at `/`.
+      - [x] **C4 KJ play-order nudge**: `State.manual_order` (journaled) is a
+            sticky prefix of the play order; `rotation_preview` fronts it, then
+            the pin, then the round-robin tail. `move_in_order` freezes the
+            order down to the swapped slot, leaving the tail fluid. Touches
+            ONLY the projection -- never `singers` or a per-singer FIFO. The
+            single `pinned` slot is now a special case of this prefix.
+      - [x] **C5 fair queue**: newcomers no longer bump people who have been
+            waiting. A singer who hasn't performed this session slots in below a
+            rolling locked top zone (`locked_count` = round(`lock_percent`% of
+            singers), min the up-next slot), ahead of bumpable veterans but
+            behind waiting newbies and anyone protected. A veteran may be jumped
+            `bump_limit` times before becoming protected too; `State.performed`
+            and `State.bumps` (journaled) reset on that singer's turn and on
+            session reset. `State.add_singer` owns placement; off = plain append.
+      - [x] **C6 per-entry versions**: a queue entry may carry its own `version`
+            overriding the KJ's global pick; `_media_path` takes it and `/media`
+            reads `?v=`. Entries without one are byte-for-byte unchanged.
+            Groundwork for saved-list duet picks.
+      - [x] **C7 saved lists**: `ListStore` (`lists.json`, NEVER cleared by
+            session reset) holds `{name, owner_name, owner_id, created, tracks:
+            [{song_id, version?}]}` + `default_random`. Singers build lists in
+            the songbook (create/rename/delete, a build mode with a per-track
+            version picker) and load one with a tap -- each track queued with
+            its per-list version, so a list can pin a duet without changing the
+            song's global default. Edits are owner-guarded (honor system).
+      - [x] **C8 KJ list moderation** (`/kj/lists`, PIN-gated): every list
+            grouped by singer with an expandable read-only track view, rename,
+            delete, and a star toggle designating the Random-KJ pool.
+      - [x] **C9 Random KJ Song**: `POST /api/queue/random_kj` draws from the
+            designated pool via `random_pool_track`, carrying each track's
+            version override. Availability rides in every snapshot
+            (`state.kj_random_fn`) so the songbook/kiosk buttons enable and
+            disable themselves the moment the KJ changes the pool.
+      - [x] **Pre-song key tone** (issue #15, deferred out of the six then
+            built once song-sorter shipped the data). song-sorter's Key-detect
+            emits an optional `key` / `key_confidence` / `key_source`
+            (+`key_camelot`) into `index.json` **per playable copy**; KDJ sounds
+            a tonic triad and shows "Key of X" on the countdown view (empty
+            space no other visual uses). Keys resolve PER COPY via
+            `version_key()` -- alternate brand rips are frequently transposed,
+            so a copy with no confident key of its own stays silent rather than
+            borrowing a sibling's. `key_trusted` mirrors song-sorter's own gate:
+            curated/tagged keys are taken at their word, machine estimates must
+            clear `key_tone_min_confidence` (a naive threshold would have
+            silently dropped curated keys). `SingerPrefs` (`prefs.json`, keyed
+            by the registry's stable singer id) holds the per-singer opt-out --
+            it must be server-side because the shared screen needs the UPCOMING
+            singer's choice. The tone is a **tonic reference, not the first sung
+            note** (no melody data exists); a wrong key being worse than none is
+            why every gate fails closed.
+
 ## Notes for future sessions
 
 - Tests: `python test_core.py` (stdlib, no pytest needed).
@@ -280,3 +364,11 @@ folder scan otherwise. Small task on each side (song-sorter: extend
 - song-sorter's songbook stays a static file; KriticalDJ's `/` replaces it at
   parties. (Optionally the songbook generator could later gain a mode that
   links to KriticalDJ, but the built-in UI makes that unnecessary.)
+- Runtime state files are gitignored and each has a different lifetime:
+  `state.json` is party state (cleared by reset), while `singers.json`,
+  `versions.json`, `lists.json` and `prefs.json` outlive parties and must NEVER
+  be cleared by a session reset.
+- The key tone is inert until the library carries keys: run song-sorter's
+  Key-detect and re-export `index.json`, and it lights up song by song.
+  `key_tone_min_confidence` only gates `auto`/`online` keys -- `manual` and
+  `tag` are trusted outright, so don't "fix" that with a blanket threshold.
