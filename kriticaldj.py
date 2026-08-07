@@ -600,6 +600,22 @@ def random_song(songs: dict, exclude: set) -> str | None:
     return random.choice(pool) if pool else None
 
 
+def clamp_range(first: str, last: str, size: int):
+    """Resolve the halves of a `bytes=first-last` Range against a file size.
+
+    Returns inclusive (start, end), or None when the range is unsatisfiable and
+    the caller must answer 416. `first` empty means a suffix range (the last
+    `last` bytes). An end past EOF is legal and clamps; a START past EOF is not,
+    and neither is a backwards range or a zero-length suffix -- those used to
+    compute a negative length and emit a malformed response."""
+    if first:
+        start = int(first)
+        end = min(int(last), size - 1) if last else size - 1
+    else:  # suffix range: the last N bytes
+        start, end = max(0, size - int(last)), size - 1
+    return (start, end) if start <= end else None
+
+
 def locked_count(num_singers: int, lock_percent: int) -> int:
     """How many singers at the top of the rotation are locked against being
     bumped by newcomers: round(lock_percent% of the count), but always at least
@@ -1271,12 +1287,18 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
             m = re.match(r"bytes=(\d*)-(\d*)$", rng or "")
             partial = bool(m and (m.group(1) or m.group(2)))
             if partial:
-                if m.group(1):
-                    start = int(m.group(1))
-                    if m.group(2):
-                        end = min(int(m.group(2)), size - 1)
-                else:  # suffix range: last N bytes
-                    start = max(0, size - int(m.group(2)))
+                span = clamp_range(m.group(1), m.group(2), size)
+                if span is None:
+                    # Unsatisfiable (starts past EOF, runs backwards, or is a
+                    # zero-length suffix): RFC 9110 14.4 wants a 416. The old
+                    # arithmetic sent a NEGATIVE Content-Length instead, which
+                    # phones on a flaky LAN can retry against forever.
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                start, end = span
             length = end - start + 1
             self.send_response(206 if partial else 200)
             self.send_header("Content-Type", ctype)
