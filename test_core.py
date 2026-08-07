@@ -6,8 +6,9 @@ import zipfile
 from pathlib import Path
 
 from kriticaldj import (Flow, ListStore, SingerPrefs, SingerRegistry, State,
-                        Stats, VersionStore, key_tone_hz, key_trusted,
-                        locked_count, move_entry, move_singer, parse_key,
+                        Stats, VersionStore, clamp_range, key_tone_hz,
+                        key_trusted, locked_count, move_entry, move_singer,
+                        parse_key,
                         parse_title, pick_next, random_pool_track, random_song,
                         scan_library, validate_config_changes, version_key)
 
@@ -372,6 +373,26 @@ def test_entry_version_override_in_snapshot():
         rows = {r["id"]: r for r in st.snapshot(songs)["upcoming"]}
         assert rows[2]["vsel"] == 2                            # non-override follows the global
         assert rows[1]["vsel"] == 1 and rows[1]["ver"] == 0   # override is independent, stays v1
+
+
+def test_clamp_range_satisfiable():
+    # normal span, and an end past EOF is legal -> clamps to the last byte
+    assert clamp_range("0", "3", 10) == (0, 3)
+    assert clamp_range("8", "99", 10) == (8, 9)
+    assert clamp_range("0", "", 10) == (0, 9)      # open-ended from a start
+    assert clamp_range("9", "", 10) == (9, 9)      # last byte exactly
+    assert clamp_range("", "3", 10) == (7, 9)      # suffix: last 3 bytes
+    assert clamp_range("", "99", 10) == (0, 9)     # suffix longer than the file
+
+
+def test_clamp_range_unsatisfiable():
+    # each of these used to compute a negative length and emit a malformed
+    # response (negative Content-Length); they must now signal 416
+    assert clamp_range("999999", "", 10) is None   # start past EOF
+    assert clamp_range("10", "", 10) is None       # start == size
+    assert clamp_range("500", "100", 10) is None   # end below start
+    assert clamp_range("", "0", 10) is None        # zero-length suffix
+    assert clamp_range("0", "", 0) is None         # empty file: nothing to send
 
 
 def test_parse_key_and_tone_hz():
