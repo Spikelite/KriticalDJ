@@ -6,7 +6,8 @@ import zipfile
 from pathlib import Path
 
 from kriticaldj import (Flow, ListStore, SingerPrefs, SingerRegistry, State,
-                        Stats, VersionStore, clamp_range, guest_alias, key_tone_hz,
+                        Stats, VersionStore, clamp_range, guest_alias, hash_pin,
+                        key_tone_hz, valid_pin,
                         key_trusted, locked_count, move_entry, move_singer,
                         parse_key,
                         parse_title, pick_next, random_pool_track, random_song,
@@ -150,6 +151,46 @@ def test_guest_alias():
     assert guest_alias("Dave", {"dave", "dave-g"}) == "Dave-G2"
     assert guest_alias("Dave", {"dave", "dave-g", "dave-g2"}) == "Dave-G3"
     assert guest_alias("Dave", set()) == "Dave-G"   # nothing taken
+
+
+def test_valid_pin():
+    assert [valid_pin(x) for x in ("1234", "12345678", "0000")] == [True, True, True]
+    # too short, too long, non-numeric, blank
+    for bad in ("123", "123456789", "12a4", "", None, " 12 34"):
+        assert not valid_pin(bad), bad
+
+
+def test_hash_pin_salted_and_verifiable():
+    h1, s1 = hash_pin("4821")
+    assert hash_pin("4821", s1)[0] == h1            # same salt reproduces it
+    assert hash_pin("9999", s1)[0] != h1            # wrong pin does not
+    h2, s2 = hash_pin("4821")
+    assert s2 != s1 and h2 != h1                    # per-singer salt
+    assert "4821" not in h1 and len(h1) == 64       # nothing readable stored
+
+
+def test_registry_pin_lifecycle():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "singers.json"
+        reg = SingerRegistry(p)
+        reg.resolve("Walkup")
+        assert not reg.set_pin("Walkup", "1234")     # walk-ups have no account
+        reg.register("Dave")
+        assert not reg.has_pin("Dave")               # accounts start open
+        assert not reg.set_pin("Dave", "12")         # rejects a bad format
+        assert reg.set_pin("Dave", "4821") and reg.has_pin("dave")
+        assert reg.check_pin("Dave", "4821")
+        assert not reg.check_pin("Dave", "0000")
+        assert not reg.check_pin("Nobody", "4821")
+        assert SingerRegistry(p).check_pin("Dave", "4821")   # survives restart
+        # the raw PIN is never written to disk
+        assert "4821" not in p.read_text(encoding="utf-8")
+        assert reg.clear_pin("Dave") and not reg.has_pin("Dave")
+        assert not reg.clear_pin("Dave")             # already clear
+        # dropping the account takes any PIN with it
+        reg.set_pin("Dave", "5555")
+        reg.unregister("Dave")
+        assert not reg.has_pin("Dave") and not reg.check_pin("Dave", "5555")
 
 
 def test_registry_accounts():

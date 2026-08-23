@@ -89,6 +89,20 @@ Registering never deletes anything: a walk-up already has a row in
 change. The KJ can register, rename, or remove regulars at `/kj/singers`, and
 removing an account only drops the account, not the singing history.
 
+### Optional PIN
+
+A regular can protect their name with a 4 to 8 digit PIN, either at
+registration or later from the same panel, and can remove it again to go back
+to no-auth. PINs are stored hashed (pbkdf2 with a per-singer salt), never in
+the clear.
+
+Be clear about what this does and does not do. **It guards signing in as that
+singer, and stops a walk-up typing that name.** It is not account security: the
+API still accepts a singer name elsewhere, the digit space is small, and this
+remains an honor-system app on a trusted LAN. Treat it as a way to stop a
+friend claiming your name for a laugh, not as a login. If somebody forgets
+theirs, the KJ clears it from `/kj/singers`.
+
 ## How the rotation works
 
 Classic KJ rules: singers rotate in the order they joined; your own songs play
