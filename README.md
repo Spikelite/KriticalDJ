@@ -125,9 +125,17 @@ single tap, queueing every track at once. Each track in a list can pin a
 specific **version** of a song, so a list can call for a duet recording without
 changing what that song plays by default for everyone else.
 
-The KJ moderates lists at `/kj/lists`: view them grouped by singer, rename or
-delete any of them, and star one as the pool that the songbook's **KJ pick**
-button draws from. The songbook also has a plain **Random song** button that
+A list made by a **registered** singer belongs to the account, so it survives a
+rename and cannot be edited by someone who merely types that name. A guest list
+stays keyed to the name, as before. Register a name you have already been using
+and you are offered the lists sitting under it, rather than having them taken or
+lost. Lists are also browsable: any singer can load someone else's into their own
+queue, which makes a shared house list easy.
+
+The KJ moderates lists at `/kj/lists`: view them grouped by singer with
+registered owners first, rename or delete any of them, and star one as the pool
+that the songbook's **KJ pick** button draws from. Lists left behind by a guest
+who has gone home are flagged as **orphaned**, so they can be cleared out. The songbook also has a plain **Random song** button that
 picks from the whole library. Both skip songs already queued.
 
 ## Pre-song key tone

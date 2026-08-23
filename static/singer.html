@@ -69,6 +69,11 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 .track .vsel{font-size:12px;padding:3px 6px;border-radius:6px;border:1px solid #3a3f47;background:var(--bg);color:var(--text);max-width:42vw}
 .track button.x{border:none;background:none;color:var(--warn);cursor:pointer;font-size:15px}
 .thint{color:var(--dim);font-size:13px;padding:4px 0}
+.owned{font-size:12px;color:var(--dim);margin-left:4px}
+.othrow{display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1px solid var(--line);font-size:14px}
+.othrow .on{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.othrow .by{color:var(--dim)}
+.othrow button{font-size:13px;padding:4px 12px;border-radius:7px;border:1px solid #3a3f47;background:var(--bg);color:var(--accent);cursor:pointer}
 .newlist{display:flex;gap:6px;padding:8px 14px}
 .newlist input{flex:1;font-size:14px;padding:7px 10px;border-radius:8px;border:1px solid #3a3f47;background:var(--bg);color:var(--text)}
 .newlist button{padding:7px 14px;border-radius:8px;border:1px solid var(--accent);background:var(--bg);color:var(--accent);font-weight:600;cursor:pointer}
@@ -123,6 +128,7 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
   <div id="lists"></div>
   <div class="newlist"><input id="newlistname" type="text" placeholder="New list name&hellip;" maxlength="60"><button id="newlistbtn" type="button">Create</button></div>
 </section>
+<section id="otherswrap" style="display:none"><h2>Lists from other singers</h2><div id="others"></div></section>
 <div id="buildbar">Adding to <b id="buildname"></b>: tap a song below<button id="builddone" type="button">Done</button></div>
 <section><h2 id="reshead">Songs</h2><div id="meta"></div><div id="results"></div></section>
 <div id="aov"><div id="abox">
@@ -352,6 +358,13 @@ function registerName(){
       $("acctname").value="";
       loadAccounts();
       signIn(d.name);
+      if(d.claimable){
+        const n=d.claimable, plural=n===1?"list":"lists";
+        if(confirm("There "+(n===1?"is":"are")+" "+n+" saved "+plural+" under the name "+d.name+". "+(n===1?"Is it yours":"Are they yours")+"? Claiming attaches "+(n===1?"it":"them")+" to your account.")){
+          fetch("/api/accounts/claim",{method:"POST",body:JSON.stringify({name:d.name})})
+            .then(r=>r.json()).then(c=>{ toast("Claimed "+c.claimed+" "+plural); loadLists(); });
+        }
+      }
     });
 }
 $("acctreg").onclick=registerName;
@@ -376,10 +389,30 @@ $("tonechk").onchange=()=>{
 };
 
 // ---- saved lists -----------------------------------------------------------
+let OTHERS = [];
 function loadLists(){
-  if(!ME){ LISTS=[]; renderLists(); return; }
-  fetch("/api/lists?singer="+encodeURIComponent(ME)).then(r=>r.json())
-    .then(d=>{ LISTS=d.lists||[]; renderLists(); });
+  if(!ME){ LISTS=[]; OTHERS=[]; renderLists(); return; }
+  // one call for every list, split here: mine are editable, the rest loadable
+  fetch("/api/lists").then(r=>r.json()).then(d=>{
+    const all=d.lists||[], me=ME.toLowerCase();
+    LISTS  = all.filter(l=>(l.owner_name||"").toLowerCase()===me);
+    OTHERS = all.filter(l=>(l.owner_name||"").toLowerCase()!==me && l.tracks.length);
+    renderLists();
+  });
+}
+function renderOthers(){
+  const box=$("others"); box.textContent="";
+  $("otherswrap").style.display = (ME && OTHERS.length) ? "block" : "none";
+  for(const L of OTHERS){
+    const r=document.createElement("div"); r.className="othrow";
+    const n=document.createElement("span"); n.className="on";
+    n.textContent=(L.registered?"★ ":"")+L.name;
+    const by=document.createElement("span"); by.className="by";
+    by.textContent=" by "+L.owner_name+" ("+L.tracks.length+")";
+    n.appendChild(by); r.appendChild(n);
+    r.appendChild(mkLB("▶ Load",()=>loadList(L.id)));
+    box.appendChild(r);
+  }
 }
 function mkLB(txt,fn,cls){ const b=document.createElement("button"); b.type="button"; b.textContent=txt; if(cls)b.className=cls; b.onclick=fn; return b; }
 function renderLists(){
@@ -417,6 +450,7 @@ function renderLists(){
     box.appendChild(wrap);
   }
   syncBuildBar();
+  renderOthers();
 }
 function syncBuildBar(){
   const L=LISTS.find(x=>x.id===BUILDING);
