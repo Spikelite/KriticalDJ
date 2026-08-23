@@ -9,10 +9,13 @@ Author: Spike Graham, with Claude (Anthropic) as co-author.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import random
 import re
+import secrets
 import socket
 import sys
 import threading
@@ -415,6 +418,39 @@ class SingerRegistry:
             self._write()
             return rec["name"], rec["id"]
 
+    # -- optional PIN (#27) -------------------------------------------------
+    def has_pin(self, name: str) -> bool:
+        rec = self.by_key.get((name or "").strip().casefold())
+        return bool(rec and rec.get("registered") and rec.get("pin_hash"))
+
+    def check_pin(self, name: str, pin) -> bool:
+        rec = self.by_key.get((name or "").strip().casefold())
+        if not rec or not rec.get("pin_hash"):
+            return False
+        got, _ = hash_pin(str(pin or ""), rec.get("pin_salt", ""))
+        return hmac.compare_digest(got, rec["pin_hash"])   # constant time
+
+    def set_pin(self, name: str, pin) -> bool:
+        with self.lock:
+            rec = self.by_key.get((name or "").strip().casefold())
+            if not rec or not rec.get("registered") or not valid_pin(pin):
+                return False
+            rec["pin_hash"], rec["pin_salt"] = hash_pin(str(pin).strip())
+            self._write()
+            return True
+
+    def clear_pin(self, name: str) -> bool:
+        """Back to no-auth. Used by the singer themselves and by the KJ when
+        somebody has forgotten theirs."""
+        with self.lock:
+            rec = self.by_key.get((name or "").strip().casefold())
+            if not rec or not rec.get("pin_hash"):
+                return False
+            rec.pop("pin_hash", None)
+            rec.pop("pin_salt", None)
+            self._write()
+            return True
+
     def unregister(self, name: str) -> bool:
         """Drop the account back to walk-up status. The row and its id stay, so
         stats history is untouched -- only the account-ness goes."""
@@ -424,6 +460,8 @@ class SingerRegistry:
                 return False
             rec.pop("registered", None)
             rec.pop("registered_at", None)
+            rec.pop("pin_hash", None)      # no account, no PIN
+            rec.pop("pin_salt", None)
             self._write()
             return True
 
@@ -749,6 +787,26 @@ def clamp_range(first: str, last: str, size: int):
     else:  # suffix range: the last N bytes
         start, end = max(0, size - int(last)), size - 1
     return (start, end) if start <= end else None
+
+
+# A singer PIN is 4-8 digits: numeric so a phone shows a keypad between songs.
+# It is a speed bump against a nosy guest on the party LAN, not real security:
+# the space is small and the app is honor-system throughout (#27).
+_PIN_ITERATIONS = 100_000
+
+
+def valid_pin(pin) -> bool:
+    p = str(pin or "").strip()
+    return p.isdigit() and 4 <= len(p) <= 8
+
+
+def hash_pin(pin: str, salt: str = "") -> tuple:
+    """(hash_hex, salt_hex) for a PIN, via stdlib pbkdf2. Sign-in is rare, so
+    the iteration cost is affordable even on a Pi."""
+    salt = salt or secrets.token_hex(16)
+    h = hashlib.pbkdf2_hmac("sha256", str(pin).encode("utf-8"),
+                            bytes.fromhex(salt), _PIN_ITERATIONS)
+    return h.hex(), salt
 
 
 def guest_alias(base: str, taken: set) -> str:
@@ -1660,7 +1718,9 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 out.sort(key=lambda x: (x["owner_name"].casefold(), x["created"]))
                 return self._json({"lists": out})
             if u.path == "/api/accounts":
-                return self._json({"accounts": registry.accounts()})
+                return self._json({"accounts": [
+                    {"name": n, "pin": registry.has_pin(n)}
+                    for n in registry.accounts()]})
             if u.path == "/api/prefs":
                 # a singer's own settings; lookup never mints a phantom singer
                 who = parse_qs(u.query).get("singer", [""])[0]
@@ -1672,7 +1732,8 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 if not self._authed():
                     return self._json({"error": "auth required"}, 401)
                 here = {n.casefold() for n in state.singers}
-                rows = [{"name": n, "here": n.casefold() in here}
+                rows = [{"name": n, "here": n.casefold() in here,
+                         "pin": registry.has_pin(n)}
                         for n in registry.accounts()]
                 return self._json({"accounts": rows,
                                    "singers": list(state.singers),
@@ -1778,6 +1839,10 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 if any(n.casefold() == raw.casefold() for n in state.singers):
                     return self._json({"error": "that name is already singing tonight",
                                        "code": "name_taken"}, 409)
+                if registry.has_pin(raw):
+                    return self._json({"error": "that name belongs to a registered "
+                                                "singer; sign in with their PIN",
+                                       "code": "pin"}, 409)
                 name, _sid = registry.resolve(raw)  # canonical casing, stable id
 
                 def fn():
@@ -1790,10 +1855,15 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 raw = (body.get("name") or "").strip()[:40]
                 if not raw:
                     return self._json({"error": "name required"}, 400)
+                pin = body.get("pin")
+                if pin not in (None, "") and not valid_pin(pin):
+                    return self._json({"error": "a PIN must be 4 to 8 digits"}, 400)
                 got = registry.register(raw)
                 if got is None:
                     return self._json({"error": "that name is already registered",
                                        "code": "name_taken"}, 409)
+                if pin not in (None, ""):
+                    registry.set_pin(got[0], pin)
                 name, sid = got
                 # a guest who just registered the name they are already using
                 # keeps their spot, they simply stop being ephemeral
@@ -1804,7 +1874,24 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 # lists built under this name before registering are offered,
                 # not absorbed: the name may have been somebody else earlier
                 return self._json({"ok": True, "name": name,
+                                   "pin": registry.has_pin(name),
                                    "claimable": len(lists.claimable(name))})
+            if u.path == "/api/singers/pin":
+                raw = (body.get("name") or "").strip()[:40]
+                if not registry.is_registered(raw):
+                    return self._json({"error": "not a registered singer"}, 404)
+                # changing or removing one needs the current PIN; setting a
+                # first one does not, since there is nothing to prove yet
+                if registry.has_pin(raw) and not registry.check_pin(raw, body.get("pin")):
+                    return self._json({"error": "wrong PIN", "code": "pin"}, 401)
+                new = body.get("new_pin")
+                if new in (None, ""):
+                    registry.clear_pin(raw)
+                    return self._json({"ok": True, "pin": False})
+                if not valid_pin(new):
+                    return self._json({"error": "a PIN must be 4 to 8 digits"}, 400)
+                registry.set_pin(raw, new)
+                return self._json({"ok": True, "pin": True})
             if u.path == "/api/accounts/claim":
                 raw = (body.get("name") or "").strip()[:40]
                 if not registry.is_registered(raw):
@@ -1816,6 +1903,8 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 raw = (body.get("name") or "").strip()[:40]
                 if not registry.is_registered(raw):
                     return self._json({"error": "not a registered singer"}, 404)
+                if registry.has_pin(raw) and not registry.check_pin(raw, body.get("pin")):
+                    return self._json({"error": "wrong PIN", "code": "pin"}, 401)
                 name, _sid = registry.resolve(raw)
                 moved = []
 
@@ -2214,6 +2303,8 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                     state.mutate(songs, fn)
                     lists.rename_owner(raw, got)        # keep list labels honest
                     return self._json({"ok": True, "name": got})
+                if action == "clear_pin":    # somebody forgot theirs
+                    return self._json({"ok": registry.clear_pin(raw)})
                 if action == "remove":       # back to walk-up; history is untouched
                     ok = registry.unregister(raw)
                     def fn():

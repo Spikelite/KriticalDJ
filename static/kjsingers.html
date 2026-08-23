@@ -18,8 +18,10 @@ header a+a{margin-left:16px}
 .add button{padding:9px 16px;border-radius:8px;border:1px solid var(--ok);background:var(--bg);color:var(--ok);font-weight:600;cursor:pointer}
 .row{display:flex;align-items:center;gap:8px;background:var(--panel);border:1px solid #2a2e36;border-radius:10px;padding:10px 12px;margin-bottom:7px;flex-wrap:wrap}
 .row .nm{font-size:16px;font-weight:600}
-.row .here{font-size:12px;color:var(--ok);margin-right:auto}
-.row .away{font-size:12px;color:var(--dim);margin-right:auto}
+.row .here{font-size:12px;color:var(--ok)}
+.row .pin{font-size:11px;text-transform:uppercase;letter-spacing:.05em;padding:2px 7px;border-radius:999px;border:1px solid #3a3f47;color:var(--dim);margin-right:auto}
+.row .pin.on{color:var(--accent);border-color:#2c4a56}
+.row .away{font-size:12px;color:var(--dim)}
 .row button{font-size:13px;padding:5px 11px;border-radius:8px;border:1px solid #3a3f47;background:var(--bg);color:var(--text);cursor:pointer}
 .row button.del{color:var(--warn)}
 h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;margin:18px 0 6px}
@@ -39,7 +41,8 @@ h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em
 </header>
 <p class="intro">Regulars keep their name between parties and pick themselves from a list when
 they arrive. Walk-up guests stay ephemeral and are never listed here. Removing an account only
-drops the account: the singer's history is kept.</p>
+drops the account: the singer's history is kept. A PIN only guards signing in as that singer;
+clear one for anybody who has forgotten theirs.</p>
 
 <div class="add">
   <input id="newname" type="text" placeholder="Register a singer by name&hellip;" maxlength="40" autocomplete="off">
@@ -73,6 +76,9 @@ function load(){
       const nm=document.createElement("span"); nm.className="nm"; nm.textContent="★ "+a.name; r.appendChild(nm);
       const st=document.createElement("span"); st.className=a.here?"here":"away";
       st.textContent=a.here?"here tonight":"not here"; r.appendChild(st);
+      const pin=document.createElement("span"); pin.className="pin"+(a.pin?" on":"");
+      pin.textContent=a.pin?"PIN set":"no PIN"; r.appendChild(pin);
+      if(a.pin) r.appendChild(mkb("Clear PIN",()=>clearPin(a.name)));
       r.appendChild(mkb("Rename",()=>rename(a.name)));
       r.appendChild(mkb("Remove",()=>remove(a.name),"del"));
       box.appendChild(r);
@@ -94,6 +100,12 @@ function registerName(n){
   post("/api/kj/account/register",{name:name}).then(d=>{
     if(!d.ok){ msg(d.error||"Could not register",true); return; }
     $("newname").value=""; msg("Registered "+d.name+"."); load();
+  });
+}
+function clearPin(n){
+  if(!confirm("Clear the PIN for "+n+"? Use this when somebody has forgotten theirs. Their account goes back to signing in with no PIN.")) return;
+  post("/api/kj/account/clear_pin",{name:n}).then(d=>{
+    msg(d.ok?("Cleared the PIN for "+n+"."):"Could not clear", !d.ok); load();
   });
 }
 function rename(cur){

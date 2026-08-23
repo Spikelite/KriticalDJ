@@ -91,6 +91,11 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 #abox .who:hover{border-color:var(--accent)}
 #abox .who .here{margin-left:auto;font-size:12px;color:var(--ok)}
 #abox .none{color:var(--dim);font-size:13px;padding:6px 0}
+#abox .lock{margin-left:auto;font-size:12px;color:var(--dim)}
+#abox .pinrow{display:flex;gap:6px;margin-top:6px;align-items:center;flex-wrap:wrap}
+#abox .pinrow label{font-size:13px;color:var(--dim);display:flex;align-items:center;gap:6px;cursor:pointer}
+#abox .pinrow input{width:130px;font-size:14px;padding:8px 10px;border-radius:8px;border:1px solid #3a3f47;background:var(--bg);color:var(--text)}
+#abox .pinrow button{padding:8px 14px;border-radius:8px;border:1px solid var(--accent);background:var(--bg);color:var(--accent);font-weight:600;cursor:pointer}
 #abox .reg{display:flex;gap:6px;margin-top:6px}
 #abox .reg input{flex:1;font-size:14px;padding:8px 10px;border-radius:8px;border:1px solid #3a3f47;background:var(--bg);color:var(--text)}
 #abox .reg button{padding:8px 14px;border-radius:8px;border:1px solid var(--ok);background:var(--bg);color:var(--ok);font-weight:600;cursor:pointer}
@@ -139,6 +144,18 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
   <h3>New here often?</h3>
   <div class="sub">Register a name and it will be waiting for you next time.</div>
   <div class="reg"><input id="acctname" type="text" placeholder="Your singer name" maxlength="40" autocomplete="off"><button id="acctreg" type="button">Register</button></div>
+  <div class="pinrow"><label><input type="checkbox" id="acctusepin" style="width:16px"> Protect it with a PIN</label>
+    <input id="acctpin" type="password" inputmode="numeric" placeholder="4-8 digits" maxlength="8" autocomplete="off" style="display:none"></div>
+  <div id="pinsettings" style="display:none">
+    <div class="hr"></div>
+    <h3>Your PIN</h3>
+    <div class="sub" id="pinstate"></div>
+    <div class="pinrow">
+      <input id="pincur" type="password" inputmode="numeric" placeholder="Current PIN" maxlength="8" autocomplete="off">
+      <input id="pinnew" type="password" inputmode="numeric" placeholder="New (blank removes)" maxlength="8" autocomplete="off">
+      <button id="pinsave" type="button">Save</button>
+    </div>
+  </div>
   <button class="cls" onclick="closeAcct()">Close</button>
 </div></div>
 <div id="toast"></div>
@@ -209,7 +226,7 @@ function songRow(s, opts){
 }
 
 function renderState(){
-  if(ME !== listsME){ listsME = ME; loadLists(); loadPrefs(); syncAcctBtn(); }  // singer changed
+  if(ME !== listsME){ listsME = ME; loadLists(); loadPrefs(); syncAcctBtn(); syncPinSettings(); }  // singer changed
   if($("kjrandbtn")) $("kjrandbtn").disabled = !(STATE && STATE.kj_random);
   if(!STATE){ renderNames(); return; }
   renderNames();
@@ -318,8 +335,9 @@ function openAcct(){ loadAccounts(); $("aov").classList.add("on"); }
 function closeAcct(){ $("aov").classList.remove("on"); }
 $("aov").onclick=e=>{ if(e.target.id==="aov") closeAcct(); };
 
+function acctFor(n){ return ACCOUNTS.find(a=>a.name.toLowerCase()===(n||"").toLowerCase()); }
 function syncAcctBtn(){
-  const b=$("acctbtn"), reg=ME && ACCOUNTS.includes(ME);
+  const b=$("acctbtn"), reg=ME && !!acctFor(ME);
   b.textContent = reg ? ("★ "+ME) : "Register / Sign in";
   b.classList.toggle("reg", !!reg);
 }
@@ -330,19 +348,28 @@ function loadAccounts(){
     if(!ACCOUNTS.length){ const e=document.createElement("div"); e.className="none";
       e.textContent="Nobody has registered yet."; box.appendChild(e); }
     const here=new Set((STATE?STATE.singers:[]).map(n=>n.toLowerCase()));
-    for(const n of ACCOUNTS){
+    for(const a of ACCOUNTS){
       const r=document.createElement("div"); r.className="who";
-      r.appendChild(document.createTextNode("★ "+n));
-      if(here.has(n.toLowerCase())){ const h=document.createElement("span");
+      r.appendChild(document.createTextNode("★ "+a.name));
+      if(a.pin){ const l=document.createElement("span"); l.className="lock";
+        l.textContent="PIN"; r.appendChild(l); }
+      if(here.has(a.name.toLowerCase())){ const h=document.createElement("span");
         h.className="here"; h.textContent="here tonight"; r.appendChild(h); }
-      r.onclick=()=>signIn(n);
+      r.onclick=()=>signIn(a.name, a.pin);
       box.appendChild(r);
     }
-    syncAcctBtn();
+    syncAcctBtn(); syncPinSettings();
   });
 }
-function signIn(name){
-  fetch("/api/singers/login",{method:"POST",body:JSON.stringify({name:name})})
+function signIn(name, needsPin, knownPin){
+  const body={name:name};
+  if(needsPin){
+    // straight after registering we already know it, so do not ask again
+    let p = (knownPin===undefined||knownPin===null||knownPin==="") ? prompt("PIN for "+name+":") : knownPin;
+    if(p===null) return;                 // cancelled
+    body.pin=p;
+  }
+  fetch("/api/singers/login",{method:"POST",body:JSON.stringify(body)})
     .then(r=>r.json()).then(d=>{
       if(!d.ok){ toast(d.error||"Could not sign in"); return; }
       setMe(d.name); closeAcct();
@@ -352,12 +379,20 @@ function signIn(name){
 }
 function registerName(){
   const v=$("acctname").value.trim(); if(!v) return;
-  fetch("/api/accounts",{method:"POST",body:JSON.stringify({name:v})})
+  const body={name:v};
+  if($("acctusepin").checked){
+    const p=$("acctpin").value.trim();
+    if(!/^\d{4,8}$/.test(p)){ toast("A PIN must be 4 to 8 digits"); return; }
+    body.pin=p;
+  }
+  fetch("/api/accounts",{method:"POST",body:JSON.stringify(body)})
     .then(r=>r.json()).then(d=>{
       if(!d.ok){ toast(d.error||"Could not register"); return; }
       $("acctname").value="";
+      const justSet=body.pin; $("acctpin").value=""; $("acctusepin").checked=false;
+      $("acctpin").style.display="none";
       loadAccounts();
-      signIn(d.name);
+      signIn(d.name, d.pin, justSet);
       if(d.claimable){
         const n=d.claimable, plural=n===1?"list":"lists";
         if(confirm("There "+(n===1?"is":"are")+" "+n+" saved "+plural+" under the name "+d.name+". "+(n===1?"Is it yours":"Are they yours")+"? Claiming attaches "+(n===1?"it":"them")+" to your account.")){
@@ -367,6 +402,30 @@ function registerName(){
       }
     });
 }
+$("acctusepin").onchange=()=>{ $("acctpin").style.display=$("acctusepin").checked?"":"none";
+  if($("acctusepin").checked) $("acctpin").focus(); };
+// your own PIN, once signed in as a registered singer
+function syncPinSettings(){
+  const a=ME?acctFor(ME):null;
+  $("pinsettings").style.display = a ? "block" : "none";
+  if(!a) return;
+  $("pinstate").textContent = a.pin
+    ? "Signing in as "+a.name+" asks for a PIN. Leave New blank to remove it."
+    : "No PIN yet. Anyone can sign in as "+a.name+" until you set one.";
+  $("pincur").style.display = a.pin ? "" : "none";
+}
+function savePin(){
+  const a=acctFor(ME); if(!a) return;
+  const body={name:ME, new_pin:$("pinnew").value.trim()};
+  if(a.pin) body.pin=$("pincur").value.trim();
+  fetch("/api/singers/pin",{method:"POST",body:JSON.stringify(body)})
+    .then(r=>r.json()).then(d=>{
+      if(!d.ok){ toast(d.error||"Could not save"); return; }
+      $("pincur").value=""; $("pinnew").value="";
+      toast(d.pin?"PIN set":"PIN removed"); loadAccounts();
+    });
+}
+$("pinsave").onclick=savePin;
 $("acctreg").onclick=registerName;
 $("acctname").onkeydown=e=>{ if(e.key==="Enter") registerName(); };
 fetch("/api/accounts").then(r=>r.json()).then(d=>{ ACCOUNTS=d.accounts||[]; syncAcctBtn(); });

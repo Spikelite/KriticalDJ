@@ -123,6 +123,8 @@ folder scan otherwise. Small task on each side (song-sorter: extend
 - `GET /api/accounts` / `POST /api/accounts {"name"}`: registered singers, register
   (the response reports how many guest lists are claimable under that name)
 - `POST /api/accounts/claim {"name"}`: bind those guest lists to the account
+- `POST /api/singers/pin {"name","pin","new_pin"}`: set, change, or remove your own PIN
+- `POST /api/kj/account/clear_pin {"name"}`: operator reset for a forgotten PIN
 - `GET /api/lists` with no singer: browse everyone's lists (any singer can load one)
 - `POST /api/singers/login {"name"}`: join tonight as a registered singer
 - `GET /api/kj/accounts`, `POST /api/kj/account/{register,rename,remove}`: operator side
