@@ -7,7 +7,8 @@
 <style>
 :root{--bg:#14161a;--panel:#1e2128;--text:#e8eaed;--dim:#9aa0a6;--accent:#4fc3f7;--line:#22252c;--ok:#7bd88f}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,Arial,sans-serif}
+body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,Arial,sans-serif;
+ padding-bottom:68px}  /* clears the floating toast */
 header{position:sticky;top:0;background:var(--panel);padding:10px 12px;z-index:2;box-shadow:0 2px 8px rgba(0,0,0,.5)}
 h1{font-size:18px;margin:0 0 4px}
 #now{font-size:13px;color:var(--dim);min-height:17px;margin-bottom:8px}
@@ -53,6 +54,7 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 #tonepref{font-size:13px;color:var(--dim);margin-bottom:8px}
 #tonepref label{display:flex;align-items:center;gap:7px;cursor:pointer}
 #tonepref input{width:16px;height:16px}
+.row.inlist .add{color:var(--ok)}
 .listrow{border-bottom:1px solid var(--line)}
 .listhead{display:flex;align-items:center;gap:6px;padding:8px 14px;flex-wrap:wrap}
 .listhead b{font-size:15px}
@@ -68,7 +70,9 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 .newlist{display:flex;gap:6px;padding:8px 14px}
 .newlist input{flex:1;font-size:14px;padding:7px 10px;border-radius:8px;border:1px solid #3a3f47;background:var(--bg);color:var(--text)}
 .newlist button{padding:7px 14px;border-radius:8px;border:1px solid var(--accent);background:var(--bg);color:var(--accent);font-weight:600;cursor:pointer}
-#buildbar{position:fixed;left:0;right:0;bottom:0;background:var(--ok);color:#03240f;padding:10px 14px;font-size:14px;display:none;align-items:center;gap:10px;z-index:5;box-shadow:0 -2px 8px rgba(0,0,0,.4)}
+/* In the normal flow, never over the list: a fixed bar here covered the last
+   row and, unlike the toast, swallowed taps on it. */
+#buildbar{display:none;align-items:center;gap:10px;background:var(--ok);color:#03240f;padding:10px 14px;font-size:14px}
 #buildbar.on{display:flex}
 #buildbar button{margin-left:auto;padding:6px 14px;border-radius:8px;border:none;background:#03240f;color:var(--ok);font-weight:700;cursor:pointer}
 #toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--accent);color:#00222f;
@@ -103,8 +107,8 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
   <div id="lists"></div>
   <div class="newlist"><input id="newlistname" type="text" placeholder="New list name&hellip;" maxlength="60"><button id="newlistbtn" type="button">Create</button></div>
 </section>
+<div id="buildbar">Adding to <b id="buildname"></b>: tap a song below<button id="builddone" type="button">Done</button></div>
 <section><h2 id="reshead">Songs</h2><div id="meta"></div><div id="results"></div></section>
-<div id="buildbar">Adding to <b id="buildname"></b> &mdash; tap a song below<button id="builddone" type="button">Done</button></div>
 <div id="toast"></div>
 <script>
 "use strict";
@@ -244,7 +248,8 @@ function search(){
       const r=songRow(s,{});
       const add=document.createElement("div"); add.className="add"; add.textContent="+";
       r.appendChild(add);
-      r.onclick=()=> BUILDING ? addToList(s) : queueSong(s);  // build mode: add to the list instead
+      if(BUILDING && inBuildList(s.song_id)) markInList(r);
+      r.onclick=()=> BUILDING ? addToList(s,r) : queueSong(s);  // build mode: add to the list instead
       box.appendChild(r);
     }
   });
@@ -339,24 +344,30 @@ function syncBuildBar(){
 function createList(){
   const nm=$("newlistname").value.trim(); if(!nm||!ME) return;
   fetch("/api/lists",{method:"POST",body:JSON.stringify({singer:ME,name:nm})})
-    .then(r=>r.json()).then(d=>{ $("newlistname").value=""; if(d.id) BUILDING=d.id; loadLists(); toast("List created. Tap songs to add"); });
+    .then(r=>r.json()).then(d=>{ $("newlistname").value=""; if(d.id) BUILDING=d.id; loadLists(); search(); toast("List created. Tap songs to add"); });
 }
 function loadList(id){ fetch("/api/lists/"+id+"/queue",{method:"POST",body:JSON.stringify({singer:ME})})
   .then(r=>r.json()).then(d=>{ if(d.ok) toast("Queued "+d.queued+" song"+(d.queued===1?"":"s")+" ✓"); }); }
-function toggleBuild(id){ BUILDING=(BUILDING===id)?null:id; renderLists(); if(BUILDING) window.scrollTo({top:0,behavior:"smooth"}); }
+function toggleBuild(id){ BUILDING=(BUILDING===id)?null:id; renderLists(); search(); if(BUILDING) window.scrollTo({top:0,behavior:"smooth"}); }
 function renameList(id,cur){ const nm=prompt("Rename list:",cur); if(nm&&nm.trim())
   fetch("/api/lists/"+id+"/rename",{method:"POST",body:JSON.stringify({singer:ME,name:nm.trim()})}).then(()=>loadLists()); }
 function delList(id,nm){ if(confirm("Delete list \""+nm+"\"?"))
   fetch("/api/lists/"+id+"/delete",{method:"POST",body:JSON.stringify({singer:ME})}).then(()=>{ if(BUILDING===id)BUILDING=null; loadLists(); }); }
-function addToList(s){ if(!BUILDING) return;
+// The row marks itself, so there is no banner on every tap. Only a FAILURE
+// still toasts, because nothing else would show it.
+function inBuildList(sid){ const L=LISTS.find(x=>x.id===BUILDING);
+  return !!(L && L.tracks.some(t=>t.song_id===sid)); }
+function markInList(r){ r.classList.add("inlist");
+  const a=r.querySelector(".add"); if(a) a.textContent="✓"; }
+function addToList(s,row){ if(!BUILDING) return;
   fetch("/api/lists/"+BUILDING+"/add",{method:"POST",body:JSON.stringify({singer:ME,song_id:s.song_id})})
-    .then(r=>r.json()).then(d=>{ toast(d.ok?"Added to list ✓":"Couldn't add"); loadLists(); }); }
+    .then(r=>r.json()).then(d=>{ if(d.ok){ if(row) markInList(row); } else toast("Couldn't add"); loadLists(); }); }
 function removeTrack(id,i){ fetch("/api/lists/"+id+"/remove",{method:"POST",body:JSON.stringify({singer:ME,index:i})}).then(()=>loadLists()); }
 function setTrackVersion(id,i,val){ const b={singer:ME,index:i}; if(val!=="") b.version=parseInt(val);
   fetch("/api/lists/"+id+"/set_version",{method:"POST",body:JSON.stringify(b)}).then(()=>loadLists()); }
 $("newlistbtn").onclick=createList;
 $("newlistname").onkeydown=e=>{ if(e.key==="Enter") createList(); };
-$("builddone").onclick=()=>{ BUILDING=null; renderLists(); };
+$("builddone").onclick=()=>{ BUILDING=null; renderLists(); search(); };
 
 const es=new EventSource("/events");
 es.onmessage=e=>{ STATE=JSON.parse(e.data); renderState(); };
