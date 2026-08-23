@@ -29,9 +29,11 @@ Then open, in a browser:
 | `/screen` | The TV/projector (fullscreen browser) | Lyrics during songs; NOW / NEXT / rotation + QR between songs |
 | `/setup` | The KJ, before/after the party | Rescan library, reset session, statistics, live config editing |
 
-Singers don't need accounts, because the honor system runs the door at a
-karaoke party. The KJ console, list moderation, and setup screen are gated by
-a 4-digit PIN (`kj_pin`, default `0000`, changeable from the setup screen).
+No singer has to register: type a name and sing. A regular can optionally
+register one, and optionally protect it with a PIN, but the honor system still
+runs the door at a karaoke party. The operator pages (`/kj`, `/kj/singers`,
+`/kj/lists`, `/setup`) are gated by a 4-digit PIN (`kj_pin`, default `0000`,
+changeable from the setup screen).
 
 Deploying on a Raspberry Pi (systemd service, dual-screen Chromium kiosk,
 Bluetooth audio calibration): see [DEPLOY.md](DEPLOY.md).
@@ -51,7 +53,8 @@ up-next call-out over the last 15 seconds, and a corner track timer.
 **The KJ console.** Transport (Play / Pause / Start over / Skip / Singer's
 next / Start now), live lyrics-sync nudges, the rotation with the locked
 up-next slot, per-song version pickers, sticky play-order arrows, an on-demand
-join QR, and singer and queue management, all behind the 4-digit PIN.
+join QR, and singer and queue management, all behind the 4-digit PIN. Links
+from here reach the registered-singer and saved-list pages.
 
 <p>
   <img src="docs/kj-console.png" width="70%" alt="KJ console: transport bar, rotation with locked next and version buttons, singers, queue">

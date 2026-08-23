@@ -360,6 +360,68 @@ folder scan otherwise. Small task on each side (song-sorter: extend
             note** (no melody data exists); a wrong key being worse than none is
             why every gate fails closed.
 
+- [x] **Phase 9: post-UAT-3 hardening and singer accounts** (one issue per PR,
+      each closing its issue on merge; 52 -> 64 tests).
+      - [x] **416 for unsatisfiable Range requests** (#17): `_serve_file`
+            trusted client byte offsets, so a range past EOF, a backwards one,
+            or a zero-length suffix computed a NEGATIVE length and emitted
+            `Content-Length: -999989`. Phones re-issue range requests
+            constantly on a flaky LAN, and how a client handles a protocol
+            violation is undefined, so the realistic failure was a track that
+            would not start or a retry loop against the Pi. The arithmetic
+            moved into a pure `clamp_range()`; satisfiable requests, including
+            an end past EOF, are unchanged.
+      - [x] **Transient banners stopped covering the last list row** (#21):
+            reported as a favorites toast, but there is no favorites feature.
+            The action was adding to a saved list in build mode, and the toast
+            was not even the blocker (it has `pointer-events:none`). `#buildbar`
+            was: fixed to the viewport, opaque to taps, and present for the
+            whole build session. It moved into the normal flow, both songbooks
+            reserve room for the floating toast, and adding to a list is now
+            confirmed by the row itself rather than a banner on every tap.
+      - [x] **Key tone made usable** (#19): the tone was too short, but the
+            larger cause was that `phase == "countdown"` is set ONLY by
+            `Flow.start_now`, so the countdown view appears only when the KJ
+            presses Start now and the tone was absent from nearly every song.
+            It now fires during the intermission too, timed to finish as the
+            track begins, driven from the ticker because no SSE arrives between
+            mutations. The figure walks the triad then RETURNS TO THE TONIC and
+            holds it (it used to end on the fifth, so the note left ringing was
+            the wrong one), uses stacked partials rather than a bare sine, and
+            scales to the time available. `key_tone_every_song` and
+            `key_tone_volume` are configurable.
+      - [x] **Registered singers** (#25): walk-ups are unchanged; a regular can
+            register a name and pick themselves from a list next time. The key
+            realisation is that `SingerRegistry` ALREADY keeps everyone forever
+            because stats reference those ids, so this is a `registered` flag on
+            the existing row, not a second identity store, and nothing is
+            deleted. Names on the board must be unambiguous: a name already
+            being sung is refused, and a walk-up holding a registered name is
+            stood aside as `Name-G` by `State.rename_singer`, keeping their
+            queued songs, rotation slot and fairness counters. `State.guests`
+            (journaled) records who is ephemeral.
+      - [x] **Lists bound to accounts** (#26): #25 had introduced a live bug
+            where a stood-aside guest's list transferred to the account holder.
+            The trap is that a registry id is DERIVED FROM THE NAME, so
+            guest-Dave and registered-Dave share one and keying by id alone
+            fixes nothing; `State.guests` is the real discriminator
+            (`acting_registered`). Registered lists follow the account through
+            renames, guest lists stay name-keyed, and only guest lists travel
+            when a walk-up stands aside. Registering OFFERS the lists sitting
+            under that name rather than absorbing them. Any singer can browse
+            and load another's list; the moderation page marks accounts and
+            flags guest lists whose owner has gone home as orphaned.
+      - [x] **Optional singer PIN** (#27): 4-8 digits, chosen at registration or
+            added later, removable back to no-auth, hashed with pbkdf2 and a
+            per-singer salt. Deliberately **sign-in only**, and worth being
+            blunt in both directions: it guards signing in as that singer and
+            blocks a walk-up taking a PIN-protected name (without that the PIN
+            would protect nothing, since anyone could just BE Dave by the guest
+            route), but it is NOT account security. Other endpoints still accept
+            a singer name, the digit space is small, and this stays an
+            honor-system app on a trusted LAN. The KJ clears forgotten PINs.
+            Known gap: while an account has no PIN, anybody can set one on it.
+
 ## Notes for future sessions
 
 - Tests: `python test_core.py` (stdlib, no pytest needed).
