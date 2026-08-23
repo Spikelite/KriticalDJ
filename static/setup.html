@@ -85,6 +85,8 @@ const CFGF = [
   ["bump_limit", "Max bumps before a singer is protected", "number", "how many newcomers can jump a waiting veteran"],
   ["key_tone_enabled", "Pre-song key tone", "checkbox", "sound the song's key during the countdown; singers can opt out individually"],
   ["key_tone_min_confidence", "Minimum key confidence (%)", "number", "machine-estimated keys below this stay silent; curated/tagged keys always play"],
+  ["key_tone_every_song", "Key tone before every song", "checkbox", "off = only when the KJ presses Start now"],
+  ["key_tone_volume", "Key tone volume (%)", "number", "how loud the reference tone is relative to the music"],
   ["host", "Bind address", "text", "needs a service restart"],
   ["port", "Port", "number", "needs a service restart"],
   ["kj_pin", "KJ access PIN (4 digits)", "password", "unlocks /kj and /setup; blank keeps the current PIN"],

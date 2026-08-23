@@ -60,6 +60,9 @@ body[data-view="count"] #count{display:flex}
 #countwho b{color:var(--accent)}
 /* pre-song key reference: the countdown view is otherwise empty space, so the
    hint can't collide with lyrics or the rotation board */
+#boardkey{font-size:2.8vh;color:var(--ok);margin-top:.8vh;min-height:3.4vh;opacity:0;transition:opacity .4s}
+#boardkey.on{opacity:1}
+#boardkey b{font-weight:800}
 #keyhint{font-size:3.2vh;color:var(--ok);min-height:4.5vh;text-align:center;opacity:0;transition:opacity .4s}
 #keyhint.on{opacity:1}
 #keyhint b{font-size:4.2vh;font-weight:800}
@@ -81,6 +84,7 @@ body[data-view="count"] #count{display:flex}
     <div class="lbl" id="nowlbl">Grab the mic</div>
     <div id="nowname">&nbsp;</div>
     <div id="nowsong">&nbsp;</div>
+    <div id="boardkey"></div>
   </div>
   <div class="bottom">
     <div class="rot-col">
@@ -198,8 +202,10 @@ setInterval(() => {
     $("timer").textContent = !STATE.upcoming.length ? ""
       : STATE.held ? "⏸ " + Math.ceil(STATE.hold_remaining || 0)
       : Math.ceil(remain);
+    maybeKeyTone();
   } else if (STATE.phase === "countdown") {
     $("bignum").textContent = Math.max(1, Math.ceil(remain));
+    maybeKeyTone();
   } else if (STATE.phase === "playing") {
     // corner elapsed/total timer, and the up-next call-out over the last 15 s
     const tm = $("ptimer"), d = audio.duration;
@@ -212,30 +218,80 @@ setInterval(() => {
   $("upnext").classList.remove("show");
 }, 200);
 
-// ---- pre-song key reference tone (#15) --------------------------------------
-// A short tonic triad through the same speaker as the music, so the singer can
-// pitch their entry. Server decides IF and sends the exact frequencies; this
-// just sounds them. Silent if Web Audio is unavailable.
-let actx = null, tonedFor = null;
-function playKeyTone(freqs) {
+// ---- pre-song key reference tone (#15, reworked per #19) --------------------
+// A sine is the easiest thing to lose in a room, and a 1s figure ends before a
+// singer registers it, so this stacks a few partials for an organ-like tone
+// that carries, walks the triad to establish major/minor, then RETURNS TO THE
+// TONIC and holds it. The note left ringing is the one they have to start on.
+// Scales itself to whatever time is left so it always finishes before the
+// track. Server decides IF; this only decides how it sounds.
+let actx = null, master = null, tonedFor = null;
+const ARP = 0.34, SUS = 1.95;              // per arpeggio note, and the held tonic
+const TONE_LEAD = 3 * ARP + SUS + 0.35;    // fire this long before the song starts
+
+function toneGain() {   // KJ-set percent -> gain, with headroom for the partials
+  const pct = (STATE && STATE.key_tone_volume != null) ? STATE.key_tone_volume
+            : (CFG.key_tone_volume != null ? CFG.key_tone_volume : 60);
+  return Math.max(0, Math.min(100, pct)) / 100 * 0.5;
+}
+
+function playKeyTone(freqs, avail) {
   try {
     actx = actx || new (window.AudioContext || window.webkitAudioContext)();
-    if (actx.state === "suspended") actx.resume();
-    const t0 = actx.currentTime + 0.08, dur = 0.42, gap = 0.34;
-    freqs.forEach((f, i) => {
+    // resume() is async, so a rejection escapes the try/catch below; swallow it
+    // rather than leave an unhandled rejection on a kiosk nobody is watching
+    if (actx.state === "suspended" && actx.resume) {
+      try { const p = actx.resume(); if (p && p.catch) p.catch(() => {}); } catch (e) {}
+    }
+    master = actx.createGain();
+    master.gain.value = toneGain();
+    master.connect(actx.destination);
+
+    // squeeze the figure into the time we actually have (a 3 s Start-now
+    // countdown is shorter than the full shape)
+    let arp = ARP, sus = SUS;
+    const full = 3 * arp + sus;
+    if (avail && avail < full) {
+      const k = Math.max(0.35, avail / full);
+      arp *= k; sus *= k;
+    }
+    const t0 = actx.currentTime + 0.06;
+    // partials: fundamental plus two quieter ones. Sums to 1.49, and the master
+    // caps at 0.5, so the mix cannot clip on the venue system.
+    const PARTIALS = [[1, 1.0], [2, 0.35], [3, 0.14]];
+    const note = (f, start, dur, hold) => PARTIALS.forEach(([mult, amp]) => {
       const o = actx.createOscillator(), g = actx.createGain();
       o.type = "sine";
-      o.frequency.value = f;
-      const s = t0 + i * gap;
-      g.gain.setValueAtTime(0.0001, s);
-      g.gain.exponentialRampToValueAtTime(0.22, s + 0.04);
-      g.gain.exponentialRampToValueAtTime(0.0001, s + dur);
+      o.frequency.value = f * mult;
+      g.gain.setValueAtTime(0.0001, start);
+      g.gain.exponentialRampToValueAtTime(amp, start + 0.035);   // soft attack
+      g.gain.setValueAtTime(amp, start + dur * hold);            // plateau
+      g.gain.exponentialRampToValueAtTime(0.0001, start + dur);  // release
       o.connect(g);
-      g.connect(actx.destination);
-      o.start(s);
-      o.stop(s + dur + 0.02);
+      g.connect(master);
+      o.start(start);
+      o.stop(start + dur + 0.02);
     });
-  } catch (e) { /* no Web Audio: the countdown just stays silent */ }
+    // tonic, third, fifth ... then back to the tonic and hold it
+    freqs.forEach((f, i) => note(f, t0 + i * arp, arp * 1.05, 0.55));
+    note(freqs[0], t0 + 3 * arp, sus, 0.75);
+  } catch (e) { /* no Web Audio: stay silent rather than break the screen */ }
+}
+
+// Fire once per upcoming entry, late enough that the reference is still in the
+// singer's ear when the track starts. Held countdowns (KJ paused, or nothing
+// queued) are not about to start a song, so they stay quiet.
+function maybeKeyTone() {
+  const st = STATE;
+  if (!st || (st.phase !== "intermission" && st.phase !== "countdown")) return;
+  if (st.held) return;
+  const e = (st.upcoming || [])[0];
+  if (!e || !e.key_tone || !e.tone_hz || tonedFor === e.id) return;
+  if (st.phase === "intermission" && st.key_tone_every_song === false) return;
+  const remain = st.deadline - (Date.now() / 1000 + clockOff);
+  if (remain > TONE_LEAD) return;          // still too early
+  tonedFor = e.id;                         // claim it either way, so this runs once
+  if (remain > 0.4) playKeyTone(e.tone_hz, remain - 0.3);
 }
 
 // ---- state application ------------------------------------------------------
@@ -244,6 +300,7 @@ function apply() {
   clockOff = st.server_time - Date.now() / 1000;
 
   if (st.phase === "playing" && st.now) {
+    tonedFor = null;                    // re-arm for the next song
     document.body.dataset.view = "play";
     if (!curEntry || curEntry.id !== st.now.id) loadSong(st.now);
     const nxt = $("hdrnext");
@@ -283,6 +340,18 @@ function apply() {
     $("nowlbl").textContent = "Grab the mic";
     $("nowname").textContent = up[0].singer;
     $("nowsong").textContent = up[0].title + " — " + up[0].artist;
+    // the key belongs on the board too: this is where the next singer is
+    // standing up, and most songs never pass through the Start-now countdown
+    const bk = $("boardkey");
+    bk.textContent = "";
+    if (up[0].key_tone) {
+      bk.appendChild(document.createTextNode("♪ Key of "));
+      const kb = document.createElement("b");
+      kb.textContent = up[0].key;
+      bk.appendChild(kb);
+      bk.appendChild(document.createTextNode(", listen for your starting note"));
+    }
+    bk.classList.toggle("on", !!up[0].key_tone);
     // rotation list: everyone after the current mic-holder, singer and song;
     // the first row (up next) is highlighted
     up.slice(1, 10).forEach((e, i) => {
@@ -298,6 +367,8 @@ function apply() {
     $("nowlbl").textContent = st.singers.length ? "Queue is empty" : "Welcome";
     $("nowname").textContent = "Pick a song!";
     $("nowsong").textContent = "";
+    $("boardkey").classList.remove("on");
+    $("boardkey").textContent = "";
     $("timer").textContent = "";
   }
 
@@ -317,7 +388,8 @@ function apply() {
       kh.appendChild(kb);
       kh.appendChild(document.createTextNode(", listen for your starting note"));
       kh.classList.add("on");
-      if (tonedFor !== e0.id) { tonedFor = e0.id; playKeyTone(e0.tone_hz); }
+      // sounding it is maybeKeyTone's job (the ticker), which knows how much
+      // time is left; apply() only paints the label
     } else {
       kh.classList.remove("on");
       kh.textContent = "";

@@ -62,8 +62,10 @@ highlight matches what you hear (Bluetooth typically wants +100 to +250 ms).
 The value persists in `config.json`.
 
 The pre-song key tone plays through this same speaker, so it inherits the same
-latency. If it lands late against the countdown, shorten
-`start_now_countdown_seconds` or turn `key_tone_enabled` off from `/setup`.
+latency. Both it and the music are delayed equally, so they stay in step. Tune
+`key_tone_volume` on `/setup` until the reference carries over the room without
+startling anyone, and use `key_tone_every_song` if you would rather it only
+sounded when you press Start now.
 
 ### If the audio stutters or drops out
 
