@@ -87,7 +87,7 @@ const CFGF = [
   ["key_tone_min_confidence", "Minimum key confidence (%)", "number", "machine-estimated keys below this stay silent; curated/tagged keys always play"],
   ["host", "Bind address", "text", "needs a service restart"],
   ["port", "Port", "number", "needs a service restart"],
-  ["kj_pin", "KJ access PIN (4 digits)", "password", "unlocks /kj and /setup — blank keeps the current PIN"],
+  ["kj_pin", "KJ access PIN (4 digits)", "password", "unlocks /kj and /setup; blank keeps the current PIN"],
 ];
 
 function refresh(){
@@ -115,7 +115,7 @@ function refresh(){
   fetch("/api/stats/summary").then(r=>r.json()).then(d=>{
     $("stotal").textContent = d.events
       ? d.events.toLocaleString() + " events recorded across " + d.sessions + " session" + (d.sessions===1?"":"s")
-      : "No history yet — stats start recording with the first queued song.";
+      : "No history yet. Stats start recording with the first queued song.";
     const t = $("stats"); t.textContent = "";
     const rows = [];
     d.top_played.slice(0,5).forEach(([s,n],i)=>rows.push(["Most played #"+(i+1), s+"  ("+n+"×)"]));
@@ -157,7 +157,7 @@ $("save").onclick = () => {
       refresh();
     })
     .catch(()=>{ $("save").innerHTML = "&#128190; Save changes";
-      $("msg").classList.add("bad"); $("msg").textContent = "Save failed — server unreachable?"; });
+      $("msg").classList.add("bad"); $("msg").textContent = "Save failed. Server unreachable?"; });
 };
 
 $("reset").onclick = () => {

@@ -283,7 +283,7 @@ function apply() {
     $("nowlbl").textContent = "Grab the mic";
     $("nowname").textContent = up[0].singer;
     $("nowsong").textContent = up[0].title + " — " + up[0].artist;
-    // rotation list: everyone after the current mic-holder, singer — song;
+    // rotation list: everyone after the current mic-holder, singer and song;
     // the first row (up next) is highlighted
     up.slice(1, 10).forEach((e, i) => {
       const d = document.createElement("div");
@@ -315,7 +315,7 @@ function apply() {
       const kb = document.createElement("b");
       kb.textContent = e0.key;
       kh.appendChild(kb);
-      kh.appendChild(document.createTextNode(" — listen for your starting note"));
+      kh.appendChild(document.createTextNode(", listen for your starting note"));
       kh.classList.add("on");
       if (tonedFor !== e0.id) { tonedFor = e0.id; playKeyTone(e0.tone_hz); }
     } else {

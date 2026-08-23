@@ -1,4 +1,4 @@
-# KriticalDJ — Build Plan
+# KriticalDJ Build Plan
 
 A lean LAN karaoke player. This file is the durable roadmap: development is
 deliberately stop-and-start (token budget), so every phase ends at a working,
@@ -10,18 +10,18 @@ tested checkpoint and this file records exactly where we are.
 
 - **One Python 3.9+ stdlib-only server** (`kriticaldj.py`). No pip installs on
   the host. Serves three surfaces:
-  - `/` — singer UI (BYOD phones/tablets): browse/search library, pick or
+  - `/`: singer UI (BYOD phones/tablets): browse/search library, pick or
     create a singer name, queue songs. Honor system, no auth.
-  - `/kj` — KJ console (separate URL space, unlinked from singer UI):
+  - `/kj`: KJ console (separate URL space, unlinked from singer UI):
     Play / Pause / Skip / Next, Start-now button, queue management. In-event
     controls only; lifecycle actions live on `/setup` (rescan library, reset
     session, config overview).
-  - `/screen` — the TV/projector output, opened fullscreen in a browser on
+  - `/screen`: the TV/projector output, opened fullscreen in a browser on
     the server machine: CDG rendering during songs; between songs an
     intermission board (NOW singing / up NEXT / full rotation queue) plus a
     QR code pointing at the singer UI.
-- **State**: `state.json`, atomically rewritten on every mutation — queue,
-  singers, rotation cursor, now-playing, phase — so a power failure loses
+- **State**: `state.json`, atomically rewritten on every mutation: queue,
+  singers, rotation cursor, now-playing, phase, so a power failure loses
   nothing. Singer names are per-session data but they live in the journal too
   (surviving a crash mid-party); "new session" = KJ reset (later phase).
 - **Flow control lives server-side**: phases `idle -> playing -> intermission
@@ -31,8 +31,8 @@ tested checkpoint and this file records exactly where we are.
   phase deadlines and broadcasts.
 - **Live updates**: Server-Sent Events at `/events` (stdlib-friendly, one-way
   push is all we need). All three surfaces subscribe.
-- **Library**: point `music_root` at any folder tree of karaoke files —
-  designed for song-sorter's Final-final output (`letter/artist/stem.ext`),
+- **Library**: point `music_root` at any folder tree of karaoke files.
+  Designed for song-sorter's Final-final output (`letter/artist/stem.ext`),
   but any layout works. Indexes `.mp3`+`.cdg` pairs and `.zip` archives
   containing both. Zips are extracted on demand into `.media-cache/`.
 - **Rotation**: classic KJ round-robin. Singers rotate in join order; each
@@ -89,47 +89,47 @@ folder scan otherwise. Small task on each side (song-sorter: extend
 
 ## API sketch
 
-- `GET /api/state` — full state; `GET /events` — SSE push of same
-- `GET /api/songs?q=...` — search the index
-- `POST /api/singers {"name"}` — join the rotation
-- `POST /api/queue {"song_id","singer"}` — queue a song (auto-registers singer)
-- `DELETE /api/queue/<entry_id>` — remove an entry
-- `POST /api/kj/play|pause|skip|start_now` — transport (KJ)
-- `POST /api/kj/restart` — one-shot restart of the current song (via transport)
-- `POST /api/kj/skip_singer` — skip now-playing to the SAME singer's next song
-- `POST /api/kj/pin {"entry_id"}` — hand the locked up-next slot to any entry
-- `GET /api/song_versions?song_id=` — a song's versions + active index
-- `POST /api/kj/version {"song_id","index"}` — pick/remember a song's version
-- `POST /api/kj/entry_move {"entry_id","dir"}` — reorder within a singer's FIFO
-- `POST /api/kj/singer_move {"name","dir"}` / `singer_remove {"name"}` — rotation order
-- `POST /api/kj/reset` — clear session; `POST /api/kj/rescan` — reindex library
-- `POST /api/setup/config {key: value, ...}` — validated live config edit
-- `POST /api/kj/offset {"delta"}` — nudge lyrics_offset_ms (persisted + live)
-- `POST /api/screen/ended` — screen reports song finished
-- `GET /media/<song_id>/mp3|cdg[?v=N]` — media with HTTP Range support; `v`
+- `GET /api/state`: full state; `GET /events`: SSE push of same
+- `GET /api/songs?q=...`: search the index
+- `POST /api/singers {"name"}`: join the rotation
+- `POST /api/queue {"song_id","singer"}`: queue a song (auto-registers singer)
+- `DELETE /api/queue/<entry_id>`: remove an entry
+- `POST /api/kj/play|pause|skip|start_now`: transport (KJ)
+- `POST /api/kj/restart`: one-shot restart of the current song (via transport)
+- `POST /api/kj/skip_singer`: skip now-playing to the SAME singer's next song
+- `POST /api/kj/pin {"entry_id"}`: hand the locked up-next slot to any entry
+- `GET /api/song_versions?song_id=`: a song's versions + active index
+- `POST /api/kj/version {"song_id","index"}`: pick/remember a song's version
+- `POST /api/kj/entry_move {"entry_id","dir"}`: reorder within a singer's FIFO
+- `POST /api/kj/singer_move {"name","dir"}` / `singer_remove {"name"}`: rotation order
+- `POST /api/kj/reset`: clear session; `POST /api/kj/rescan`: reindex library
+- `POST /api/setup/config {key: value, ...}`: validated live config edit
+- `POST /api/kj/offset {"delta"}`: nudge lyrics_offset_ms (persisted + live)
+- `POST /api/screen/ended`: screen reports song finished
+- `GET /media/<song_id>/mp3|cdg[?v=N]`: media with HTTP Range support; `v`
   selects a per-entry version override
-- `POST /api/queue/random` — queue a random library song for a singer
-- `POST /api/queue/random_kj` — random song from the KJ's designated pool list
-- `POST /api/kj/queue_move {"entry_id","dir"}` — sticky nudge in the play order
-- `GET /api/lists?singer=` / `POST /api/lists {"singer","name"}` — saved lists
-- `POST /api/lists/<id>/{add,remove,set_version,rename,delete,queue}` — a
+- `POST /api/queue/random`: queue a random library song for a singer
+- `POST /api/queue/random_kj`: random song from the KJ's designated pool list
+- `POST /api/kj/queue_move {"entry_id","dir"}`: sticky nudge in the play order
+- `GET /api/lists?singer=` / `POST /api/lists {"singer","name"}`: saved lists
+- `POST /api/lists/<id>/{add,remove,set_version,rename,delete,queue}`: a
   singer's own list (owner-guarded); `queue` loads it with version overrides
-- `GET /api/kj/lists` — moderation view (all lists + default random pool)
-- `POST /api/kj/list/default {"list_id"}` — tag the Random-KJ pool
-- `POST /api/kj/list/<id>/{rename,delete}` — KJ override on any list
-- `GET|POST /api/prefs {"singer","key_tone"}` — per-singer settings
+- `GET /api/kj/lists`: moderation view (all lists + default random pool)
+- `POST /api/kj/list/default {"list_id"}`: tag the Random-KJ pool
+- `POST /api/kj/list/<id>/{rename,delete}`: KJ override on any list
+- `GET|POST /api/prefs {"singer","key_tone"}`: per-singer settings
 
 ## Phases
 
-- [x] **Phase 1 — server core** (scaffold, config, scanner, state journal,
+- [x] **Phase 1: server core** (scaffold, config, scanner, state journal,
       rotation engine, HTTP+SSE API, media serving, unit tests, live smoke
       test). *Done: all endpoints exercised end-to-end with curl.*
-- [x] **Phase 2 — singer UI** (`/`): search/browse, name picker, queue +
+- [x] **Phase 2: singer UI** (`/`): search/browse, name picker, queue +
       my-songs view with live rotation position, SSE-driven banner; sidecar
       `index.json` support in `scan_library` (emitter added in song-sorter).
       *Code complete + API smoke-tested; on-device browser validation deferred
       to the user's next test pass.*
-- [x] **Phase 3 — screen** (`/screen`): vendored `cdgraphics` 7.0.0 (ISC)
+- [x] **Phase 3: screen** (`/screen`): vendored `cdgraphics` 7.0.0 (ISC)
       and `qrcode-generator` 1.4.4 (MIT) into `static/`; CDG canvas playback
       synced to audio with `lyrics_offset_ms` compensation; audio-unlock gate
       (autoplay policy); intermission board (grab-the-mic NOW / up NEXT /
@@ -137,14 +137,14 @@ folder scan otherwise. Small task on each side (song-sorter: extend
       countdown; transport (play/pause) applied via SSE seq; POSTs
       /api/screen/ended. *Code complete + endpoints smoke-tested; VISUAL
       validation with real CDG files pending user's test pass.*
-- [x] **Phase 4 — KJ console** (`/kj`): transport bar (Play/Pause/Skip/
+- [x] **Phase 4: KJ console** (`/kj`): transport bar (Play/Pause/Skip/
       Start-now), live lyrics-sync nudge buttons (-50/-10/+10/+50 ms,
       persisted to config + broadcast live to the screen), rotation preview
       with per-entry remove, singer chips with reorder/kick (kick drops their
       queued songs), per-singer queue FIFO reorder, two-step session reset,
       library rescan. *All endpoints smoke-tested end-to-end; browser pass
-      pending user.* MVP COMPLETE — phases 1-4 all code-complete.
-- [~] **Phase 5 — polish** (OPEN — user review findings land here):
+      pending user.* MVP COMPLETE: phases 1-4 all code-complete.
+- [~] **Phase 5: polish** (OPEN, user review findings land here):
       - [x] singer UI songbook-parity search: All/Artist/Song-title filter
             pills + A–Z artist browse (server: `field`/`letter` params on
             /api/songs with precomputed per-field search text).
@@ -155,7 +155,7 @@ folder scan otherwise. Small task on each side (song-sorter: extend
       - [ ] GitHub upload (user does this after review).
       - [ ] optional niceties only if wanted: volume duck on pause,
             next-singer chime, config UI.
-- [x] **Phase 6 — statistics system** (DONE 2026-07-03): records
+- [x] **Phase 6: statistics system** (DONE 2026-07-03): records
       what gets picked and what actually gets played, tied to singer identity.
       - **Event log**: append-only `stats.jsonl`, one JSON line per event
         (`ts`, `event`, `singer_id`, `song_id`, artist/title snapshot).
@@ -167,8 +167,8 @@ folder scan otherwise. Small task on each side (song-sorter: extend
         last_seen}); names are enforced unique, and a returning name
         reattaches to its existing id (honor system, same as everything
         else). Session reset clears the *rotation*, never the registry.
-        This keeps the door open for a more robust ID system later without
-        rewriting history — stats rows reference the id, not the name.
+        This keeps the door open for a stronger ID system later without
+        rewriting history, because stats rows reference the id, not the name.
       - **Future queries this enables**: most-picked / most-played songs,
         skip rate per song, singer histories ("your favorites"), per-party
         summaries, "play it again" shortcuts in the singer UI.
@@ -180,7 +180,7 @@ folder scan otherwise. Small task on each side (song-sorter: extend
         registry everywhere; GET /api/stats/summary aggregates (events,
         sessions, top played/queued/singers) and /setup displays it.
 
-- [~] **Phase 7 — UAT-feedback pass** (started 2026-07-04, chunked for the
+- [~] **Phase 7: UAT-feedback pass** (started 2026-07-04, chunked for the
       token budget; each chunk ends compilable + tested):
       - [x] **C1 singer UI**: name picker is a dropdown (placeholder default so
             nobody queues as someone else, remembered in localStorage, inline
@@ -191,7 +191,7 @@ folder scan otherwise. Small task on each side (song-sorter: extend
             now-playing song but promote the SAME singer's next queued entry;
             cursor untouched so rotation is unaffected; falls back to plain
             skip when they have nothing else).
-      - [x] **C3 locked up-next**: `state.pinned` (journaled entry id) — first
+      - [x] **C3 locked up-next**: `state.pinned` (journaled entry id). First
             projection locks the next slot; passive queue adds can never
             displace it (rotation_preview fronts the pin, `_begin_next`
             consumes + re-pins). KJ overrides: reorders clear the pin,
@@ -225,25 +225,25 @@ folder scan otherwise. Small task on each side (song-sorter: extend
             power check, Class 1 dongle escalation, and the wired-aux
             endgame (USB DAC -> mixer aux, lyrics offset back to ~0).
             Doc-only chunk; no app code.
-      - [~] **C7 library data cleanup** (lives in song-sorter, not KDJ —
+      - [~] **C7 library data cleanup** (lives in song-sorter, not KDJ;
             KDJ reads index.json verbatim). Scanned the synced 164k-track
-            cache. Verdicts: (a) **Coulton album** — 32 tracks mislabeled
+            cache. Verdicts: (a) **Coulton album**: 32 tracks mislabeled
             `Bz's Homemade`, songs already correct → alias added; (b) **Rocky
-            Horror** — `The Rocky Horror Show` ×7 unified to `...Picture
+            Horror**: `The Rocky Horror Show` ×7 unified to `...Picture
             Show` ×31 → alias added. Both apply via the *Unify artists*
             menu on prod (39 tracks) then re-export. (c) `[SF Karaoke]`/
-            `[DMG Karaoke]` brackets — 0 in current cache, already gone; a
+            `[DMG Karaoke]` brackets: 0 in current cache, already gone; a
             stale index.json on the Pi just needs a re-export. (d)
-            `Artist-Song-Artist` — 0 in source data; likely a KDJ display
-            artifact, awaiting a concrete example. (e) **catalog-tag leaks**
-            — FIXED in song-sorter main.py: `_parse_artist_song` now handles
+            `Artist-Song-Artist`: 0 in source data; likely a KDJ display
+            artifact, awaiting a concrete example. (e) **catalog-tag leaks**:
+            FIXED in song-sorter main.py: `_parse_artist_song` now handles
             compact `CATALOG-TRACK-ARTIST-SONG` stems (no spaces, e.g.
             `DIS61201-13-MARY POPPINS-...`) via `_COMPACT_CATALOG_RE`, and
             `refresh_names` falls back to it for Unknown-artist tracks so a
             repeat *Refresh* fixes the 107/113 already cached (6 malformed
             stragglers left: MW-808/THK/LEG w/ catalog-internal dashes or no
             song). Verified against all 113 real stems + regressions.
-      - [~] **C8 multi-version songs (big)** — KriticalDJ consumer side DONE
+      - [~] **C8 multi-version songs (big)**: KriticalDJ consumer side DONE
             + tested + browser-verified: index.json entries may carry an
             optional `versions: [{path,label,duration}]` alongside the best
             copy; scan builds a per-song `versions` list (v0 = best, mirrors
@@ -283,7 +283,7 @@ folder scan otherwise. Small task on each side (song-sorter: extend
       `start_now` / reset clear the hold. 4 new tests (28 total) + live
       smoke of every scenario incl. pause-wins-over-queue-add.
 
-- [x] **Phase 8 — UAT round 3** (branch `CAT-Feedback`, one commit per feature,
+- [x] **Phase 8: UAT round 3** (branch `CAT-Feedback`, one commit per feature,
       merged as a single PR). Six features from several days of many-user
       testing, plus the deferred key tone. Each chunk ended compilable +
       `python test_core.py` green; 28 -> 52 tests.

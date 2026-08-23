@@ -150,7 +150,7 @@ function renderState(){
     const b=document.createElement("b"); b.textContent=STATE.next.singer; n.appendChild(b);
     n.appendChild(document.createTextNode(" — "+STATE.next.title));
   } else {
-    n.textContent="Queue is empty — be the first!";
+    n.textContent="Queue is empty. Be the first!";
   }
   // compact "now & next" strip so a crowd can see the line at a glance
   const up=(STATE.upcoming||[]);
@@ -190,7 +190,7 @@ function search(){
    .then(r=>r.json()).then(d=>{
     $("reshead").textContent = (q||LETTER) ? "Results" : "Browse";
     $("meta").textContent = d.total===0 ? "No matches." :
-      (d.total>d.songs.length ? d.total.toLocaleString()+" matches — showing "+d.songs.length+". Keep typing." :
+      (d.total>d.songs.length ? d.total.toLocaleString()+" matches, showing "+d.songs.length+". Keep typing." :
        d.total.toLocaleString()+(d.total===1?" match.":" matches."));
     const box=$("results"); box.textContent="";
     for(const s of d.songs){
