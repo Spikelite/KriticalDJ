@@ -10,7 +10,9 @@
 body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,Arial,sans-serif;
  padding-bottom:68px}  /* clears the floating toast */
 header{position:sticky;top:0;background:var(--panel);padding:10px 12px;z-index:2;box-shadow:0 2px 8px rgba(0,0,0,.5)}
-h1{font-size:18px;margin:0 0 4px}
+h1{font-size:18px;margin:0 0 4px;display:flex;align-items:baseline;gap:8px}
+#acctbtn{margin-left:auto;font-size:13px;font-weight:normal;color:var(--accent);text-decoration:none;white-space:nowrap;cursor:pointer}
+#acctbtn.reg{color:var(--ok)}
 #now{font-size:13px;color:var(--dim);min-height:17px;margin-bottom:8px}
 #now b{color:var(--accent)}
 #mypos{color:var(--ok);font-weight:600}
@@ -75,13 +77,27 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 #buildbar{display:none;align-items:center;gap:10px;background:var(--ok);color:#03240f;padding:10px 14px;font-size:14px}
 #buildbar.on{display:flex}
 #buildbar button{margin-left:auto;padding:6px 14px;border-radius:8px;border:none;background:#03240f;color:var(--ok);font-weight:700;cursor:pointer}
+#aov{position:fixed;inset:0;background:rgba(0,0,0,.75);display:none;align-items:center;justify-content:center;z-index:9;padding:14px}
+#aov.on{display:flex}
+#abox{background:var(--panel);border:1px solid #3a3f47;border-radius:12px;padding:16px;width:420px;max-width:100%;max-height:84vh;overflow:auto}
+#abox h3{margin:0 0 4px;font-size:16px}
+#abox .sub{color:var(--dim);font-size:13px;margin-bottom:10px}
+#abox .who{display:flex;align-items:center;gap:8px;padding:10px;border:1px solid #3a3f47;border-radius:8px;margin-bottom:6px;cursor:pointer;font-size:15px}
+#abox .who:hover{border-color:var(--accent)}
+#abox .who .here{margin-left:auto;font-size:12px;color:var(--ok)}
+#abox .none{color:var(--dim);font-size:13px;padding:6px 0}
+#abox .reg{display:flex;gap:6px;margin-top:6px}
+#abox .reg input{flex:1;font-size:14px;padding:8px 10px;border-radius:8px;border:1px solid #3a3f47;background:var(--bg);color:var(--text)}
+#abox .reg button{padding:8px 14px;border-radius:8px;border:1px solid var(--ok);background:var(--bg);color:var(--ok);font-weight:600;cursor:pointer}
+#abox .cls{margin-top:12px;width:100%;padding:9px;border-radius:8px;border:1px solid #3a3f47;background:var(--bg);color:var(--text);cursor:pointer}
+#abox .hr{border-top:1px solid var(--line);margin:12px 0 10px}
 #toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--accent);color:#00222f;
  padding:10px 18px;border-radius:999px;font-weight:700;opacity:0;transition:opacity .25s;pointer-events:none;max-width:90%}
 </style>
 </head>
 <body>
 <header>
-<h1 id="party">Karaoke</h1>
+<h1><span id="party">Karaoke</span><a id="acctbtn" onclick="openAcct();return false" href="#">Register / Sign in</a></h1>
 <div id="now"></div>
 <div class="names" id="names">
   <span class="lbl">I am:</span>
@@ -109,6 +125,16 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 </section>
 <div id="buildbar">Adding to <b id="buildname"></b>: tap a song below<button id="builddone" type="button">Done</button></div>
 <section><h2 id="reshead">Songs</h2><div id="meta"></div><div id="results"></div></section>
+<div id="aov"><div id="abox">
+  <h3>Regulars</h3>
+  <div class="sub">Sign in to be recognised as a returning singer. No password needed.</div>
+  <div id="acctlist"></div>
+  <div class="hr"></div>
+  <h3>New here often?</h3>
+  <div class="sub">Register a name and it will be waiting for you next time.</div>
+  <div class="reg"><input id="acctname" type="text" placeholder="Your singer name" maxlength="40" autocomplete="off"><button id="acctreg" type="button">Register</button></div>
+  <button class="cls" onclick="closeAcct()">Close</button>
+</div></div>
 <div id="toast"></div>
 <script>
 "use strict";
@@ -152,7 +178,9 @@ function hideAddForm(){
 function submitAddName(){
   const v=$("newname").value.trim(); if(!v){ hideAddForm(); return; }
   fetch("/api/singers",{method:"POST",body:JSON.stringify({name:v})})
-    .then(r=>r.json()).then(d=>{ hideAddForm(); setMe(d.name||v); toast("Welcome, "+(d.name||v)+"!"); });
+    .then(r=>r.json()).then(d=>{
+      if(d && d.error){ toast(d.error); return; }   // e.g. that name is already singing
+      hideAddForm(); setMe(d.name||v); toast("Welcome, "+(d.name||v)+"!"); });
 }
 $("nameSel").addEventListener("change",e=>{
   const v=e.target.value;
@@ -175,7 +203,7 @@ function songRow(s, opts){
 }
 
 function renderState(){
-  if(ME !== listsME){ listsME = ME; loadLists(); loadPrefs(); }  // singer changed
+  if(ME !== listsME){ listsME = ME; loadLists(); loadPrefs(); syncAcctBtn(); }  // singer changed
   if($("kjrandbtn")) $("kjrandbtn").disabled = !(STATE && STATE.kj_random);
   if(!STATE){ renderNames(); return; }
   renderNames();
@@ -275,6 +303,60 @@ function queueKJRandom(){
       : toast(d.error==="no KJ pool set" ? "KJ hasn't set up picks yet" : "Couldn't pick a song"); });
 }
 $("kjrandbtn").onclick=queueKJRandom;
+
+// ---- registered singers (#25) ----------------------------------------------
+// Walk-ups keep typing a name and being forgotten. A regular registers once and
+// then picks themselves from this list. No password yet; see #27.
+let ACCOUNTS = [];
+function openAcct(){ loadAccounts(); $("aov").classList.add("on"); }
+function closeAcct(){ $("aov").classList.remove("on"); }
+$("aov").onclick=e=>{ if(e.target.id==="aov") closeAcct(); };
+
+function syncAcctBtn(){
+  const b=$("acctbtn"), reg=ME && ACCOUNTS.includes(ME);
+  b.textContent = reg ? ("★ "+ME) : "Register / Sign in";
+  b.classList.toggle("reg", !!reg);
+}
+function loadAccounts(){
+  fetch("/api/accounts").then(r=>r.json()).then(d=>{
+    ACCOUNTS = d.accounts||[];
+    const box=$("acctlist"); box.textContent="";
+    if(!ACCOUNTS.length){ const e=document.createElement("div"); e.className="none";
+      e.textContent="Nobody has registered yet."; box.appendChild(e); }
+    const here=new Set((STATE?STATE.singers:[]).map(n=>n.toLowerCase()));
+    for(const n of ACCOUNTS){
+      const r=document.createElement("div"); r.className="who";
+      r.appendChild(document.createTextNode("★ "+n));
+      if(here.has(n.toLowerCase())){ const h=document.createElement("span");
+        h.className="here"; h.textContent="here tonight"; r.appendChild(h); }
+      r.onclick=()=>signIn(n);
+      box.appendChild(r);
+    }
+    syncAcctBtn();
+  });
+}
+function signIn(name){
+  fetch("/api/singers/login",{method:"POST",body:JSON.stringify({name:name})})
+    .then(r=>r.json()).then(d=>{
+      if(!d.ok){ toast(d.error||"Could not sign in"); return; }
+      setMe(d.name); closeAcct();
+      toast(d.guest_renamed ? ("Welcome back, "+d.name+" (a guest using your name is now "+d.guest_renamed+")")
+                            : ("Welcome back, "+d.name+"!"));
+    });
+}
+function registerName(){
+  const v=$("acctname").value.trim(); if(!v) return;
+  fetch("/api/accounts",{method:"POST",body:JSON.stringify({name:v})})
+    .then(r=>r.json()).then(d=>{
+      if(!d.ok){ toast(d.error||"Could not register"); return; }
+      $("acctname").value="";
+      loadAccounts();
+      signIn(d.name);
+    });
+}
+$("acctreg").onclick=registerName;
+$("acctname").onkeydown=e=>{ if(e.key==="Enter") registerName(); };
+fetch("/api/accounts").then(r=>r.json()).then(d=>{ ACCOUNTS=d.accounts||[]; syncAcctBtn(); });
 
 // ---- my settings: pre-song starting note (#15) -----------------------------
 // Server-side per singer (the shared screen needs the UPCOMING singer's choice,

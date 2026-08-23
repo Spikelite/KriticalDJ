@@ -25,6 +25,7 @@ Then open, in a browser:
 | `/kiosk` | A shared walk-up device | The same songbook without a personal identity: pick a singer, pick a song, and the picker resets for the next person |
 | `/kj` | The KJ (host machine) | Play / Pause / Skip, Start-now, lyrics-sync nudge, queue and rotation management, join QR |
 | `/kj/lists` | The KJ | Moderate singers' saved lists and pick the pool the "KJ pick" button draws from |
+| `/kj/singers` | The KJ | Manage registered regulars: register, rename, remove |
 | `/screen` | The TV/projector (fullscreen browser) | Lyrics during songs; NOW / NEXT / rotation + QR between songs |
 | `/setup` | The KJ, before/after the party | Rescan library, reset session, statistics, live config editing |
 
@@ -65,6 +66,28 @@ accident. Setup handles the library, sessions, stats, and all config, live.
   <img src="docs/singer.png" width="38%" alt="Singer UI on a phone: name dropdown, search, browse list">
   <img src="docs/setup.png" width="55%" alt="Setup page: library rescan, session reset, statistics, editable configuration">
 </p>
+
+## Guests and regulars
+
+Most singers are **walk-ups**: type a name, queue a song, sing, leave. Nothing is
+asked of them and nothing is offered afterwards.
+
+A **regular** can register a name from the songbook, using the Register / Sign in
+link on the title bar. There is no password; the honor system runs this the same
+as everything else. Registering means the name is held between parties, so on the
+next night they pick themselves from a list instead of typing it again, and the
+system can recognise them as a returning singer.
+
+Names on the board have to be unambiguous, so **no two singers can share one at
+the same time**. Typing a name somebody is already singing under is refused. If a
+walk-up borrowed a registered name while its owner was absent, the owner
+reclaiming it moves the guest aside to `Name-G`, keeping their queued songs and
+their place in the rotation.
+
+Registering never deletes anything: a walk-up already has a row in
+`singers.json` and keeps the same id, so statistics stay attached across the
+change. The KJ can register, rename, or remove regulars at `/kj/singers`, and
+removing an account only drops the account, not the singing history.
 
 ## How the rotation works
 

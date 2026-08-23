@@ -120,6 +120,9 @@ folder scan otherwise. Small task on each side (song-sorter: extend
 - `POST /api/kj/list/default {"list_id"}`: tag the Random-KJ pool
 - `POST /api/kj/list/<id>/{rename,delete}`: KJ override on any list
 - `GET|POST /api/prefs {"singer","key_tone"}`: per-singer settings
+- `GET /api/accounts` / `POST /api/accounts {"name"}`: registered singers, register
+- `POST /api/singers/login {"name"}`: join tonight as a registered singer
+- `GET /api/kj/accounts`, `POST /api/kj/account/{register,rename,remove}`: operator side
 
 ## Phases
 
