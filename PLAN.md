@@ -121,6 +121,9 @@ folder scan otherwise. Small task on each side (song-sorter: extend
 - `POST /api/kj/list/<id>/{rename,delete}`: KJ override on any list
 - `GET|POST /api/prefs {"singer","key_tone"}`: per-singer settings
 - `GET /api/accounts` / `POST /api/accounts {"name"}`: registered singers, register
+  (the response reports how many guest lists are claimable under that name)
+- `POST /api/accounts/claim {"name"}`: bind those guest lists to the account
+- `GET /api/lists` with no singer: browse everyone's lists (any singer can load one)
 - `POST /api/singers/login {"name"}`: join tonight as a registered singer
 - `GET /api/kj/accounts`, `POST /api/kj/account/{register,rename,remove}`: operator side
 

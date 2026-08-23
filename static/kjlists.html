@@ -17,6 +17,9 @@ header a+a{margin-left:16px}
 .owner{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;margin:16px 0 4px}
 .card{background:var(--panel);border:1px solid #2a2e36;border-radius:10px;margin-bottom:8px;overflow:hidden}
 .card.pool{border-color:var(--star)}
+.card.orphan{border-style:dashed;border-color:#4a4038}
+.chead .tag{font-size:11px;text-transform:uppercase;letter-spacing:.05em;padding:2px 7px;border-radius:999px;border:1px solid #3a3f47;color:var(--dim)}
+.chead .tag.orph{color:var(--warn);border-color:#5a3a3a}
 .chead{display:flex;align-items:center;gap:8px;padding:10px 12px;flex-wrap:wrap}
 .chead .nm{font-size:16px;font-weight:600}
 .chead .ct{color:var(--dim);font-size:13px;margin-right:auto}
@@ -40,8 +43,9 @@ header a+a{margin-left:16px}
   <a href="/kj">&larr; KJ Console</a>
   <a href="#" onclick="logout();return false">&#128274; Lock</a>
 </header>
-<p class="intro">Singers' saved lists. Tag one as the <b>&#9733; random pool</b> that the songbook's
-&ldquo;Random KJ Song&rdquo; button draws from. Rename or delete any list.</p>
+<p class="intro">Singers' saved lists, registered singers first. Tag one as the <b>&#9733; random pool</b>
+that the songbook's &ldquo;Random KJ Song&rdquo; button draws from. Rename or delete any list.
+<b>Orphaned</b> lists belong to a walk-up guest who is not in the room, so nobody is coming back for them.</p>
 <div id="msg"></div>
 <div id="lists"></div>
 <div id="empty" style="display:none">No saved lists yet. Singers create these from the songbook.</div>
@@ -65,11 +69,16 @@ function load(){
     for(const L of rows){
       if(L.owner_name !== owner){
         owner = L.owner_name;
-        const h=document.createElement("div"); h.className="owner"; h.textContent=owner||"(unknown)"; box.appendChild(h);
+        const h=document.createElement("div"); h.className="owner";
+        h.textContent=(L.registered?"★ ":"")+(owner||"(unknown)")+(L.registered?" (registered)":" (guest)");
+        box.appendChild(h);
       }
-      const card=document.createElement("div"); card.className="card"+(L.id===DEFAULT?" pool":"");
+      const card=document.createElement("div");
+      card.className="card"+(L.id===DEFAULT?" pool":"")+(L.orphan?" orphan":"");
       const head=document.createElement("div"); head.className="chead";
       const nm=document.createElement("span"); nm.className="nm"; nm.textContent=(L.id===DEFAULT?"★ ":"")+L.name; head.appendChild(nm);
+      if(L.orphan){ const t=document.createElement("span"); t.className="tag orph";
+        t.textContent="orphaned"; head.appendChild(t); }
       const ct=document.createElement("span"); ct.className="ct";
       ct.textContent=" "+L.tracks.length+" song"+(L.tracks.length===1?"":"s");
       const tog=document.createElement("button"); tog.className="toggle";

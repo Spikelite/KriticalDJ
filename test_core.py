@@ -593,6 +593,60 @@ def test_list_store_crud_and_persistence():
         assert lid not in ListStore(p).lists
 
 
+def test_list_ownership_registered_vs_guest():
+    with tempfile.TemporaryDirectory() as td:
+        ls = ListStore(Path(td) / "lists.json")
+        # same name, same registry id: only the registered flag separates them
+        acct = ls.create("Daves", "Dave", "id_dave", registered=True)
+        guest = ls.create("Borrowed", "Dave", "id_dave", registered=False)
+        A, G = ls.lists[acct], ls.lists[guest]
+        # a REGISTERED list needs the account: a namesake typing the same name
+        # is not enough, which is the protection that matters
+        assert ls.owned_by(A, "Dave", "id_dave", True)
+        assert not ls.owned_by(A, "Dave", "id_dave", False)
+        # a GUEST list stays name-owned, which is the honor system as before.
+        # The two only diverge once the walk-up is renamed aside, which is what
+        # rename_owner(guests_only=True) below is for.
+        assert ls.owned_by(G, "Dave", "id_dave", False)
+        ls.rename_owner("Dave", "Dave-G", guests_only=True)
+        assert not ls.owned_by(G, "Dave", "id_dave", True)   # now clearly not his
+        assert ls.owned_by(G, "Dave-G", None, False)         # still the guest's
+        ls.rename_owner("Dave-G", "Dave", guests_only=True)  # restore for below
+        # a registered list follows the ACCOUNT, so a renamed display name and
+        # even a namesake with a different id cannot claim it
+        assert not ls.owned_by(A, "Dave", "id_other", True)
+        A["owner_name"] = "Dave The Second"
+        assert ls.owned_by(A, "anything", "id_dave", True)
+
+
+def test_list_rename_owner_guests_only():
+    with tempfile.TemporaryDirectory() as td:
+        ls = ListStore(Path(td) / "lists.json")
+        acct = ls.create("Daves", "Dave", "id_dave", registered=True)
+        guest = ls.create("Borrowed", "Dave", "id_dave", registered=False)
+        # a walk-up standing aside takes only their own lists with them
+        assert ls.rename_owner("Dave", "Dave-G", guests_only=True) == 1
+        assert ls.lists[guest]["owner_name"] == "Dave-G"
+        assert ls.lists[acct]["owner_name"] == "Dave"    # the account stays put
+        # an account rename moves everything under that name
+        assert ls.rename_owner("Dave", "David") == 1
+        assert ls.lists[acct]["owner_name"] == "David"
+
+
+def test_list_claiming():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "lists.json"
+        ls = ListStore(p)
+        g1 = ls.create("One", "Nina", "id_nina", registered=False)
+        ls.create("Two", "Someone Else", "id_other", registered=False)
+        assert ls.claimable("nina") == [g1]              # case-insensitive
+        assert ls.claim("Nina", "id_nina") == 1
+        assert ls.lists[g1]["owner_registered"] and ls.lists[g1]["owner_id"] == "id_nina"
+        assert ls.claimable("Nina") == []                # nothing left to claim
+        assert ls.claim("Nina", "id_nina") == 0
+        assert ListStore(p).lists[g1]["owner_registered"]  # persists
+
+
 def test_list_store_bad_ops():
     with tempfile.TemporaryDirectory() as td:
         ls = ListStore(Path(td) / "lists.json")

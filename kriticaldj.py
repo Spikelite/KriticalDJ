@@ -551,14 +551,65 @@ class ListStore:
         except OSError:
             pass
 
-    def create(self, name: str, owner_name: str, owner_id: str) -> str:
+    def create(self, name: str, owner_name: str, owner_id: str,
+               registered: bool = False) -> str:
         with self.lock:
             lid = uuid.uuid4().hex[:10]
             self.lists[lid] = {"name": name[:60], "owner_name": owner_name,
                                "owner_id": owner_id,
+                               # whether the owner was a registered account at
+                               # creation. Registered lists follow the ACCOUNT
+                               # (owner_id) through renames; guest lists stay
+                               # keyed to the typed name, as they always were.
+                               "owner_registered": bool(registered),
                                "created": round(time.time(), 3), "tracks": []}
             self._save()
             return lid
+
+    # -- ownership (#26) ----------------------------------------------------
+    # A registry id is derived from the name, so guest-Dave and registered-Dave
+    # share one. The registered flag is what actually tells them apart.
+    def owned_by(self, lst: dict, name: str, singer_id, registered: bool) -> bool:
+        if lst.get("owner_registered"):
+            return bool(registered and singer_id and lst.get("owner_id") == singer_id)
+        return lst.get("owner_name", "").casefold() == (name or "").casefold()
+
+    def claimable(self, name: str) -> list:
+        """Guest-owned lists sitting under this name, offered to somebody who
+        has just registered it."""
+        key = (name or "").casefold()
+        return [lid for lid, l in self.lists.items()
+                if not l.get("owner_registered")
+                and l.get("owner_name", "").casefold() == key]
+
+    def claim(self, name: str, owner_id: str) -> int:
+        """Bind this name's guest lists to a freshly registered account."""
+        with self.lock:
+            ids = self.claimable(name)
+            for lid in ids:
+                self.lists[lid]["owner_registered"] = True
+                self.lists[lid]["owner_id"] = owner_id
+            if ids:
+                self._save()
+            return len(ids)
+
+    def rename_owner(self, old: str, new: str, guests_only: bool = False) -> int:
+        """Follow a singer's display name. `guests_only` moves just the guest
+        lists, which is what a walk-up standing aside from a reclaimed name
+        needs: the registered owner's own lists must not travel with them."""
+        ok = (old or "").casefold()
+        with self.lock:
+            n = 0
+            for l in self.lists.values():
+                if l.get("owner_name", "").casefold() != ok:
+                    continue
+                if guests_only and l.get("owner_registered"):
+                    continue
+                l["owner_name"] = new
+                n += 1
+            if n:
+                self._save()
+            return n
 
     def rename(self, lid: str, name: str) -> bool:
         with self.lock:
@@ -1277,6 +1328,15 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
         and any(t.get("song_id") in songs
                 for t in lists.lists[lists.default_random].get("tracks", [])))
 
+    def acting_registered(name: str) -> bool:
+        """Is this request really the registered account, or a walk-up who
+        happens to have typed that name? The name alone cannot say, because a
+        registry id is derived from it; State.guests is what knows (#26)."""
+        if not registry.is_registered(name):
+            return False
+        return not any(g.casefold() == (name or "").casefold()
+                       for g in state.guests)
+
     def _key_tone(song: dict, singer: str, ver: int):
         """Pre-song key payload for one queue entry, or None (stay silent).
         Silent unless: the feature is on, the copy THIS entry will actually play
@@ -1577,7 +1637,7 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 who = parse_qs(u.query).get("singer", [""])[0].strip().casefold()
                 out = []
                 for lid, l in lists.lists.items():
-                    if not who or l.get("owner_name", "").casefold() != who:
+                    if who and l.get("owner_name", "").casefold() != who:
                         continue
                     tracks = []
                     for t in l.get("tracks", []):
@@ -1595,8 +1655,9 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                         tracks.append(row)
                     out.append({"id": lid, "name": l.get("name", ""),
                                 "owner_name": l.get("owner_name", ""),
+                                "registered": bool(l.get("owner_registered")),
                                 "created": l.get("created", 0), "tracks": tracks})
-                out.sort(key=lambda x: x["created"])
+                out.sort(key=lambda x: (x["owner_name"].casefold(), x["created"]))
                 return self._json({"lists": out})
             if u.path == "/api/accounts":
                 return self._json({"accounts": registry.accounts()})
@@ -1632,10 +1693,19 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                             if 0 <= t["version"] < len(vlist):
                                 row["version_label"] = vlist[t["version"]].get("label", "")
                         tracks.append(row)
+                    reg = bool(l.get("owner_registered"))
+                    here = any(n.casefold() == l.get("owner_name", "").casefold()
+                               for n in state.singers)
                     out.append({"id": lid, "name": l.get("name", ""),
                                 "owner_name": l.get("owner_name", ""),
+                                "registered": reg,
+                                # a guest list whose owner is not in the room is
+                                # nobody's: no account holds it and the person
+                                # who typed that name has gone home
+                                "orphan": (not reg) and not here,
                                 "created": l.get("created", 0), "tracks": tracks})
-                out.sort(key=lambda x: (x["owner_name"].lower(), x["created"]))
+                out.sort(key=lambda x: (not x["registered"], x["owner_name"].lower(),
+                                        x["created"]))
                 return self._json({"default_random": lists.default_random, "lists": out})
             if u.path == "/api/songs":
                 qs = parse_qs(u.query)
@@ -1724,14 +1794,23 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 if got is None:
                     return self._json({"error": "that name is already registered",
                                        "code": "name_taken"}, 409)
-                name, _sid = got
+                name, sid = got
                 # a guest who just registered the name they are already using
                 # keeps their spot, they simply stop being ephemeral
                 def fn():
                     if name in state.guests:
                         state.guests.remove(name)
                 state.mutate(songs, fn)
-                return self._json({"ok": True, "name": name})
+                # lists built under this name before registering are offered,
+                # not absorbed: the name may have been somebody else earlier
+                return self._json({"ok": True, "name": name,
+                                   "claimable": len(lists.claimable(name))})
+            if u.path == "/api/accounts/claim":
+                raw = (body.get("name") or "").strip()[:40]
+                if not registry.is_registered(raw):
+                    return self._json({"error": "not a registered singer"}, 404)
+                name, sid = registry.resolve(raw)
+                return self._json({"ok": True, "claimed": lists.claim(name, sid)})
             if u.path == "/api/singers/login":
                 # a registered regular joining tonight, picked from the list
                 raw = (body.get("name") or "").strip()[:40]
@@ -1752,6 +1831,9 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                         alias = guest_alias(cur, taken)
                         if state.rename_singer(cur, alias):
                             moved.append(alias)
+                            # their guest lists travel with them; the account
+                            # owner's own lists stay put (#26)
+                            lists.rename_owner(cur, alias, guests_only=True)
                     if state.add_singer(name, cfg) and name in state.guests:
                         state.guests.remove(name)
                 state.mutate(songs, fn)
@@ -1868,7 +1950,9 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 if not raw or not name:
                     return self._json({"error": "name and singer required"}, 400)
                 owner, oid = registry.resolve(raw)
-                return self._json({"ok": True, "id": lists.create(name, owner, oid)})
+                reg = acting_registered(owner)   # a borrowed name is not the account
+                return self._json({"ok": True,
+                                   "id": lists.create(name, owner, oid, reg)})
             if u.path.startswith("/api/lists/"):
                 lp = [p for p in u.path.split("/") if p]  # api lists <id> <action>
                 if len(lp) != 4:
@@ -1905,8 +1989,10 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                     for sid in queued:
                         stats.log("queued", singer, flow._info(sid))
                     return self._json({"ok": True, "queued": len(queued)})
-                # editing actions require ownership (honor-system name match)
-                if raw.casefold() != lst.get("owner_name", "").casefold():
+                # editing requires ownership: an account for a registered
+                # list, the typed name for a guest one (honor system)
+                if not lists.owned_by(lst, raw, registry.lookup(raw),
+                                      acting_registered(raw)):
                     return self._json({"error": "not your list"}, 403)
                 if action == "rename":
                     nm = (body.get("name") or "").strip()[:60]
@@ -2126,6 +2212,7 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                     def fn():
                         state.rename_singer(raw, got)   # no-op when not here tonight
                     state.mutate(songs, fn)
+                    lists.rename_owner(raw, got)        # keep list labels honest
                     return self._json({"ok": True, "name": got})
                 if action == "remove":       # back to walk-up; history is untouched
                     ok = registry.unregister(raw)
