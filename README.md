@@ -109,8 +109,12 @@ picks from the whole library. Both skip songs already queued.
 
 ## Pre-song key tone
 
-If your library carries key data, the screen sounds a short tonic triad during
-the countdown and shows the song's key, so the singer can pitch their entry.
+If your library carries key data, the screen walks the triad and then holds the
+tonic, and shows the song's key, so the singer can pitch their entry. It plays
+in the last few seconds before each song starts, timed to finish just as the
+track begins, and the held note is the one they need to come in on. Set
+`key_tone_every_song` to false to restrict it to the KJ's Start now, and
+`key_tone_volume` to suit the room.
 This needs an `index.json` annotated by song-sorter's Key-detect; without it
 the feature stays silent and nothing else changes.
 
@@ -158,6 +162,8 @@ JSON-lines for any deeper analysis.
 | `bump_limit` | `2` | times a waiting singer may be jumped before being protected |
 | `key_tone_enabled` | `true` | pre-song key reference tone (master switch; singers can opt out) |
 | `key_tone_min_confidence` | `50` | percent floor for machine-estimated keys; curated keys always play |
+| `key_tone_every_song` | `true` | tone before every song; off restricts it to the KJ's Start now |
+| `key_tone_volume` | `60` | percent, how loud the tone is against the music |
 
 ## Files the server writes
 

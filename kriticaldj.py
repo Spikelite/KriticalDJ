@@ -57,6 +57,10 @@ DEFAULT_CONFIG = {
     # estimates only (a manual/tagged key is taken at its word).
     "key_tone_enabled": True,
     "key_tone_min_confidence": 50,
+    # Where it fires: True = before every song (during the intermission, timed to
+    # land just before the track), False = only the KJ's explicit Start now.
+    "key_tone_every_song": True,
+    "key_tone_volume": 60,  # percent; rooms and speakers differ
 }
 
 
@@ -85,12 +89,14 @@ _CONFIG_FIELDS = {
     "kj_pin": "pin",
     "fairness_enabled": "bool", "lock_percent": "int", "bump_limit": "int",
     "key_tone_enabled": "bool", "key_tone_min_confidence": "int",
+    "key_tone_every_song": "bool", "key_tone_volume": "int",
 }
 _CONFIG_LIMITS = {"port": (1, 65535), "intermission_seconds": (3, 600),
                   "start_now_countdown_seconds": (0, 30),
                   "lyrics_offset_ms": (-2000, 2000),
                   "lock_percent": (0, 100), "bump_limit": (0, 50),
-                  "key_tone_min_confidence": (0, 100)}
+                  "key_tone_min_confidence": (0, 100),
+                  "key_tone_volume": (0, 100)}
 _RESTART_KEYS = {"host", "port"}  # rebinding the socket can't happen live
 
 
@@ -1407,7 +1413,9 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                                    "lock_percent": cfg.get("lock_percent", 33),
                                    "bump_limit": cfg.get("bump_limit", 2),
                                    "key_tone_enabled": cfg.get("key_tone_enabled", True),
-                                   "key_tone_min_confidence": cfg.get("key_tone_min_confidence", 50)})
+                                   "key_tone_min_confidence": cfg.get("key_tone_min_confidence", 50),
+                                   "key_tone_every_song": cfg.get("key_tone_every_song", True),
+                                   "key_tone_volume": cfg.get("key_tone_volume", 60)})
             if u.path == "/api/stats/summary":
                 played, queued, singers_c = Counter(), Counter(), Counter()
                 events = resets = 0
@@ -1869,6 +1877,9 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                     cfg.update(changes)
                     if "lyrics_offset_ms" in changes:
                         state.extra["lyrics_offset_ms"] = cfg["lyrics_offset_ms"]
+                    for k in ("key_tone_every_song", "key_tone_volume"):
+                        if k in changes:
+                            state.extra[k] = cfg[k]
                     if count is not None:
                         songs.clear()
                         songs.update(fresh)
@@ -1980,6 +1991,9 @@ def main() -> None:
     print(f"[{APP}] {len(songs)} songs indexed")
     state = State(ROOT / "state.json")
     state.extra["lyrics_offset_ms"] = cfg["lyrics_offset_ms"]
+    # the screen needs these live: they change how/when it sounds the key tone
+    state.extra["key_tone_every_song"] = cfg["key_tone_every_song"]
+    state.extra["key_tone_volume"] = cfg["key_tone_volume"]
     registry = SingerRegistry(ROOT / "singers.json")
     stats = Stats(ROOT / "stats.jsonl", registry)
     versions = VersionStore(ROOT / "versions.json")

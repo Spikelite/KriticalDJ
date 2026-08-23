@@ -86,6 +86,8 @@ folder scan otherwise. Small task on each side (song-sorter: extend
 | `bump_limit` | `2` | times a waiting veteran may be jumped |
 | `key_tone_enabled` | `true` | pre-song key reference tone (master switch) |
 | `key_tone_min_confidence` | `50` | % floor for machine-estimated keys |
+| `key_tone_every_song` | `true` | tone before every song, not just Start now |
+| `key_tone_volume` | `60` | % level of the reference tone |
 
 ## API sketch
 
