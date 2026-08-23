@@ -132,7 +132,7 @@ run a private hostname (e.g. `karaoke.lan`), set it as `public_url` in
 | file | what | safe to delete? |
 |---|---|---|
 | `state.json` | live party state (crash recovery) | yes, but it clears the current party |
-| `singers.json` | persistent singer-ID registry | keep; stats reference these ids |
+| `singers.json` | persistent singer-ID registry and registered accounts | keep; stats reference these ids, and regulars live here |
 | `versions.json` | KJ's per-song version picks | keep; deleting resets every song to its best copy |
 | `stats.jsonl` | append-only event history | keep; it is your party history |
 | `lists.json` | singers' saved song lists + the KJ's random pool | keep; lists are meant to outlive a party |

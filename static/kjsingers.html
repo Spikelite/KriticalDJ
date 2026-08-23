@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Registered Singers</title>
+<style>
+:root{--bg:#14161a;--panel:#1e2128;--text:#e8eaed;--dim:#9aa0a6;--accent:#4fc3f7;--ok:#7bd88f;--warn:#e57373;--line:#22252c}
+*{box-sizing:border-box}
+body{margin:0 auto;max-width:760px;padding:0 16px;background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,Arial,sans-serif}
+header{padding:14px 0;display:flex;align-items:baseline}
+h1{font-size:19px;margin:0}
+header a{margin-left:auto;font-size:14px;color:var(--accent);text-decoration:none}
+header a+a{margin-left:16px}
+.intro{font-size:14px;color:var(--dim);margin:0 0 10px}
+.add{display:flex;gap:6px;margin-bottom:14px}
+.add input{flex:1;font-size:15px;padding:9px 11px;border-radius:8px;border:1px solid #3a3f47;background:var(--bg);color:var(--text)}
+.add button{padding:9px 16px;border-radius:8px;border:1px solid var(--ok);background:var(--bg);color:var(--ok);font-weight:600;cursor:pointer}
+.row{display:flex;align-items:center;gap:8px;background:var(--panel);border:1px solid #2a2e36;border-radius:10px;padding:10px 12px;margin-bottom:7px;flex-wrap:wrap}
+.row .nm{font-size:16px;font-weight:600}
+.row .here{font-size:12px;color:var(--ok);margin-right:auto}
+.row .away{font-size:12px;color:var(--dim);margin-right:auto}
+.row button{font-size:13px;padding:5px 11px;border-radius:8px;border:1px solid #3a3f47;background:var(--bg);color:var(--text);cursor:pointer}
+.row button.del{color:var(--warn)}
+h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;margin:18px 0 6px}
+.guests{font-size:14px;color:var(--dim);line-height:1.7}
+.guests span{display:inline-block;background:var(--panel);border:1px solid #2a2e36;border-radius:999px;padding:3px 11px;margin:0 5px 5px 0}
+.guests button{margin-left:6px;border:none;background:none;color:var(--ok);cursor:pointer;font-size:12px;padding:0}
+#empty,#noguests{color:var(--dim);font-size:14px;padding:6px 0}
+#msg{color:var(--ok);font-size:14px;min-height:18px;margin:8px 0}
+#msg.bad{color:var(--warn)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Registered Singers <span id="party" style="color:var(--dim);font-size:14px;font-weight:normal"></span></h1>
+  <a href="/kj">&larr; KJ Console</a>
+  <a href="#" onclick="logout();return false">&#128274; Lock</a>
+</header>
+<p class="intro">Regulars keep their name between parties and pick themselves from a list when
+they arrive. Walk-up guests stay ephemeral and are never listed here. Removing an account only
+drops the account: the singer's history is kept.</p>
+
+<div class="add">
+  <input id="newname" type="text" placeholder="Register a singer by name&hellip;" maxlength="40" autocomplete="off">
+  <button id="addbtn" type="button">Register</button>
+</div>
+<div id="msg"></div>
+
+<div id="list"></div>
+<div id="empty" style="display:none">Nobody has registered yet.</div>
+
+<h2>Walk-up guests here tonight</h2>
+<div class="guests" id="guests"></div>
+<div id="noguests" style="display:none">No guests in the rotation right now.</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+function logout(){ fetch("/api/kj/logout",{method:"POST"}).then(()=>location.href="/kj"); }
+fetch("/api/config").then(r=>r.json()).then(c=>{ $("party").textContent = c.party_name; });
+function msg(t,bad){ $("msg").textContent=t; $("msg").classList.toggle("bad",!!bad); }
+function mkb(txt,fn,cls){ const b=document.createElement("button"); b.type="button"; b.textContent=txt; if(cls)b.className=cls; b.onclick=fn; return b; }
+function post(path,body){ return fetch(path,{method:"POST",body:JSON.stringify(body)}).then(r=>r.json()); }
+
+function load(){
+  fetch("/api/kj/accounts").then(r=>r.json()).then(d=>{
+    const box=$("list"); box.textContent="";
+    const rows=d.accounts||[];
+    $("empty").style.display = rows.length ? "none" : "block";
+    for(const a of rows){
+      const r=document.createElement("div"); r.className="row";
+      const nm=document.createElement("span"); nm.className="nm"; nm.textContent="★ "+a.name; r.appendChild(nm);
+      const st=document.createElement("span"); st.className=a.here?"here":"away";
+      st.textContent=a.here?"here tonight":"not here"; r.appendChild(st);
+      r.appendChild(mkb("Rename",()=>rename(a.name)));
+      r.appendChild(mkb("Remove",()=>remove(a.name),"del"));
+      box.appendChild(r);
+    }
+    // guests currently in the rotation, so the KJ can sign up a regular on request
+    const g=$("guests"); g.textContent="";
+    const guests=d.guests||[];
+    $("noguests").style.display = guests.length ? "none" : "block";
+    for(const n of guests){
+      const s=document.createElement("span");
+      s.appendChild(document.createTextNode(n));
+      s.appendChild(mkb("register",()=>registerName(n)));
+      g.appendChild(s);
+    }
+  });
+}
+function registerName(n){
+  const name=(n||$("newname").value).trim(); if(!name) return;
+  post("/api/kj/account/register",{name:name}).then(d=>{
+    if(!d.ok){ msg(d.error||"Could not register",true); return; }
+    $("newname").value=""; msg("Registered "+d.name+"."); load();
+  });
+}
+function rename(cur){
+  const nn=prompt("Rename registered singer:",cur); if(!nn||!nn.trim()) return;
+  post("/api/kj/account/rename",{name:cur,new_name:nn.trim()}).then(d=>{
+    if(!d.ok){ msg(d.error||"Could not rename",true); return; }
+    msg("Renamed to "+d.name+"."); load();
+  });
+}
+function remove(n){
+  if(!confirm("Remove the account for \""+n+"\"?\n\nTheir singing history is kept; they simply stop being a registered regular.")) return;
+  post("/api/kj/account/remove",{name:n}).then(d=>{
+    msg(d.ok?("Removed "+n+"."):"Could not remove", !d.ok); load();
+  });
+}
+$("addbtn").onclick=()=>registerName();
+$("newname").onkeydown=e=>{ if(e.key==="Enter") registerName(); };
+load();
+setInterval(load, 8000);   // keep the here-tonight marks roughly current
+</script>
+</body>
+</html>

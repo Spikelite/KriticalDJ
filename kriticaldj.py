@@ -369,6 +369,84 @@ class SingerRegistry:
                 pass
             return rec["name"], rec["id"]
 
+    # -- registered accounts (#25) -----------------------------------------
+    # Everyone who ever types a name already lives here, so "registering" is a
+    # flag on the row rather than a second store: nothing is deleted, stats keep
+    # resolving, and a walk-up is forgotten simply by never being offered in the
+    # picker. Still no password; the honor system runs the door (see #27).
+    def _write(self) -> None:
+        try:
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self.by_key, indent=1, ensure_ascii=False),
+                           encoding="utf-8")
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    def is_registered(self, name: str) -> bool:
+        rec = self.by_key.get((name or "").strip().casefold())
+        return bool(rec and rec.get("registered"))
+
+    def accounts(self) -> list:
+        """Registered display names, for the join picker. Sorted so the list is
+        stable and scannable however many regulars accumulate."""
+        return sorted((r["name"] for r in self.by_key.values() if r.get("registered")),
+                      key=str.casefold)
+
+    def register(self, name: str):
+        """Promote a name to a registered account. Returns (display_name, id) or
+        None when that name is already registered to someone."""
+        key = (name or "").strip().casefold()
+        if not key:
+            return None
+        with self.lock:
+            rec = self.by_key.get(key)
+            if rec is not None and rec.get("registered"):
+                return None                      # taken; names are unique
+            now = round(time.time(), 3)
+            if rec is None:                      # brand-new regular
+                rec = {"name": name.strip(), "id": uuid.uuid4().hex[:10],
+                       "first_seen": now, "last_seen": now}
+                self.by_key[key] = rec
+            else:                                # a familiar walk-up settling down
+                rec["name"] = name.strip()
+            rec["registered"] = True
+            rec["registered_at"] = now
+            self._write()
+            return rec["name"], rec["id"]
+
+    def unregister(self, name: str) -> bool:
+        """Drop the account back to walk-up status. The row and its id stay, so
+        stats history is untouched -- only the account-ness goes."""
+        with self.lock:
+            rec = self.by_key.get((name or "").strip().casefold())
+            if not rec or not rec.get("registered"):
+                return False
+            rec.pop("registered", None)
+            rec.pop("registered_at", None)
+            self._write()
+            return True
+
+    def rename(self, old: str, new: str):
+        """Rename a registered account, keeping its id so stats stay attached.
+        Returns the new display name, or None if it is missing or the target is
+        taken by anybody (registered or not)."""
+        ok, nk = (old or "").strip().casefold(), (new or "").strip().casefold()
+        if not nk:
+            return None
+        with self.lock:
+            rec = self.by_key.get(ok)
+            if not rec or not rec.get("registered"):
+                return None
+            if nk != ok and nk in self.by_key:
+                return None
+            rec["name"] = new.strip()[:40]
+            if nk != ok:
+                del self.by_key[ok]
+                self.by_key[nk] = rec
+            self._write()
+            return rec["name"]
+
 
 class VersionStore:
     """Persistent per-song version choice (versions.json): song_id -> index
@@ -622,6 +700,15 @@ def clamp_range(first: str, last: str, size: int):
     return (start, end) if start <= end else None
 
 
+def guest_alias(base: str, taken: set) -> str:
+    """A non-colliding stand-aside name for a guest who is holding a registered
+    singer's name when the real one turns up (#25). `taken` is casefolded."""
+    cand, n = base + "-G", 2
+    while cand.casefold() in taken:
+        cand, n = base + "-G" + str(n), n + 1
+    return cand
+
+
 def locked_count(num_singers: int, lock_percent: int) -> int:
     """How many singers at the top of the rotation are locked against being
     bumped by newcomers: round(lock_percent% of the count), but always at least
@@ -760,6 +847,10 @@ class State:
         # reset when a singer takes their turn, and on session reset.
         self.performed: list[str] = []
         self.bumps: dict[str, int] = {}
+        # Which names in the rotation are walk-up guests rather than registered
+        # accounts (#25). Only used to decide who yields a contested name and to
+        # mark the regulars on screen; the rotation treats both identically.
+        self.guests: list[str] = []
         # Intermission hold: seconds left on a FROZEN countdown, or None when
         # it is running. Set while the KJ has Pause down or the queue is
         # empty; the tick loop owns the transitions (see Flow.tick_once).
@@ -776,7 +867,7 @@ class State:
             return
         for k in ("singers", "queue", "cursor", "now", "phase", "deadline",
                   "transport", "next_entry_id", "pinned", "manual_order",
-                  "performed", "bumps"):
+                  "performed", "bumps", "guests"):
             if k in d:
                 setattr(self, k, d[k])
         # A power failure mid-song resumes at the intermission board rather
@@ -793,7 +884,7 @@ class State:
         d = {k: getattr(self, k) for k in
              ("singers", "queue", "cursor", "now", "phase", "deadline",
               "transport", "next_entry_id", "pinned", "manual_order",
-              "performed", "bumps")}
+              "performed", "bumps", "guests")}
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(d, indent=1), encoding="utf-8")
         os.replace(tmp, self.path)
@@ -881,6 +972,27 @@ class State:
         self.manual_order = order[:max(i, j) + 1]
         return True
 
+    def rename_singer(self, old: str, new: str) -> bool:
+        """Rename a singer everywhere in the live session, keeping their place
+        in the rotation and their queued songs. Used when a registered singer
+        arrives to find a guest already using their name (#25): the guest is
+        moved aside rather than either of them being dropped."""
+        if old not in self.singers or new in self.singers:
+            return False
+        self.singers[self.singers.index(old)] = new
+        for e in self.queue:
+            if e["singer"] == old:
+                e["singer"] = new
+        if self.now is not None and self.now.get("singer") == old:
+            self.now["singer"] = new
+        if old in self.guests:
+            self.guests[self.guests.index(old)] = new
+        if old in self.performed:
+            self.performed[self.performed.index(old)] = new
+        if old in self.bumps:
+            self.bumps[new] = self.bumps.pop(old)
+        return True
+
     def add_singer(self, name: str, cfg: dict) -> bool:
         """Add a singer to the rotation. Returns True if newly added. With the
         fair queue on, a NEWCOMER who hasn't sung this session slots in below the
@@ -955,6 +1067,7 @@ class State:
                 "manual_order": list(self.manual_order),
                 "performed": list(self.performed),
                 "bumps": dict(self.bumps),
+                "guests": list(self.guests),
                 "held": self.hold_remaining is not None,
                 "hold_remaining": self.hold_remaining,
             }
@@ -1370,6 +1483,10 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
             parts = [p for p in u.path.split("/") if p]
             if u.path == "/":
                 return self._page("singer.html", "Singer")
+            if u.path == "/kj/singers":  # operator account-management surface
+                if not self._authed():
+                    return self._page("kjlogin.html", "Locked")
+                return self._page("kjsingers.html", "Singers")
             if u.path == "/kj/lists":  # operator list-moderation surface
                 if not self._authed():
                     return self._page("kjlogin.html", "Locked")
@@ -1481,6 +1598,8 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                                 "created": l.get("created", 0), "tracks": tracks})
                 out.sort(key=lambda x: x["created"])
                 return self._json({"lists": out})
+            if u.path == "/api/accounts":
+                return self._json({"accounts": registry.accounts()})
             if u.path == "/api/prefs":
                 # a singer's own settings; lookup never mints a phantom singer
                 who = parse_qs(u.query).get("singer", [""])[0]
@@ -1488,6 +1607,15 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                     "key_tone": prefs.get(registry.lookup(who), "key_tone", True),
                     "key_tone_enabled": bool(cfg.get("key_tone_enabled", True)),
                 })
+            if u.path == "/api/kj/accounts":
+                if not self._authed():
+                    return self._json({"error": "auth required"}, 401)
+                here = {n.casefold() for n in state.singers}
+                rows = [{"name": n, "here": n.casefold() in here}
+                        for n in registry.accounts()]
+                return self._json({"accounts": rows,
+                                   "singers": list(state.singers),
+                                   "guests": list(state.guests)})
             if u.path == "/api/kj/lists":  # moderation view: everyone's lists
                 if not self._authed():
                     return self._json({"error": "auth required"}, 401)
@@ -1575,12 +1703,60 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 raw = (body.get("name") or "").strip()[:40]
                 if not raw:
                     return self._json({"error": "name required"}, 400)
+                # One name, one singer on the board: the room has to be able to
+                # tell who is being called (#25).
+                if any(n.casefold() == raw.casefold() for n in state.singers):
+                    return self._json({"error": "that name is already singing tonight",
+                                       "code": "name_taken"}, 409)
                 name, _sid = registry.resolve(raw)  # canonical casing, stable id
 
                 def fn():
-                    state.add_singer(name, cfg)
+                    if state.add_singer(name, cfg) and name not in state.guests:
+                        state.guests.append(name)   # ephemeral unless registered
                 state.mutate(songs, fn)
                 return self._json({"ok": True, "name": name, "singers": state.singers})
+            if u.path == "/api/accounts":
+                # register: no password, just a name nobody else has claimed
+                raw = (body.get("name") or "").strip()[:40]
+                if not raw:
+                    return self._json({"error": "name required"}, 400)
+                got = registry.register(raw)
+                if got is None:
+                    return self._json({"error": "that name is already registered",
+                                       "code": "name_taken"}, 409)
+                name, _sid = got
+                # a guest who just registered the name they are already using
+                # keeps their spot, they simply stop being ephemeral
+                def fn():
+                    if name in state.guests:
+                        state.guests.remove(name)
+                state.mutate(songs, fn)
+                return self._json({"ok": True, "name": name})
+            if u.path == "/api/singers/login":
+                # a registered regular joining tonight, picked from the list
+                raw = (body.get("name") or "").strip()[:40]
+                if not registry.is_registered(raw):
+                    return self._json({"error": "not a registered singer"}, 404)
+                name, _sid = registry.resolve(raw)
+                moved = []
+
+                def fn():
+                    cur = next((n for n in state.singers
+                                if n.casefold() == name.casefold()), None)
+                    if cur is not None:
+                        if cur not in state.guests:
+                            return              # already here; nothing to do
+                        # a walk-up borrowed the name: stand them aside, keeping
+                        # their queued songs and their place in the rotation
+                        taken = {n.casefold() for n in state.singers}
+                        alias = guest_alias(cur, taken)
+                        if state.rename_singer(cur, alias):
+                            moved.append(alias)
+                    if state.add_singer(name, cfg) and name in state.guests:
+                        state.guests.remove(name)
+                state.mutate(songs, fn)
+                return self._json({"ok": True, "name": name,
+                                   "guest_renamed": moved[0] if moved else None})
             if u.path == "/api/queue":
                 sid = body.get("song_id")
                 raw = (body.get("singer") or "").strip()[:40]
@@ -1843,6 +2019,7 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                     state.manual_order = []
                     state.performed = []
                     state.bumps = {}
+                    state.guests = []
                     state.phase = "idle"
                     state.deadline = 0.0
                     state.hold_remaining = None
@@ -1925,6 +2102,44 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                 # nudge the surfaces so a version swap shows up live
                 state.mutate(songs, lambda: None)
                 return self._json({"ok": True, "song_id": sid, "active": idx})
+            if u.path.startswith("/api/kj/account/"):
+                action = u.path.rsplit("/", 1)[1]
+                raw = (body.get("name") or "").strip()[:40]
+                if not raw:
+                    return self._json({"error": "name required"}, 400)
+                if action == "register":     # sign a regular up from the console
+                    got = registry.register(raw)
+                    if got is None:
+                        return self._json({"error": "already registered"}, 409)
+                    def fn():
+                        if got[0] in state.guests:
+                            state.guests.remove(got[0])
+                    state.mutate(songs, fn)
+                    return self._json({"ok": True, "name": got[0]})
+                if action == "rename":       # fix a regular's spelling, keep their id
+                    new = (body.get("new_name") or "").strip()[:40]
+                    if not new:
+                        return self._json({"error": "new_name required"}, 400)
+                    got = registry.rename(raw, new)
+                    if got is None:
+                        return self._json({"error": "unknown account, or that name is taken"}, 409)
+                    def fn():
+                        state.rename_singer(raw, got)   # no-op when not here tonight
+                    state.mutate(songs, fn)
+                    return self._json({"ok": True, "name": got})
+                if action == "remove":       # back to walk-up; history is untouched
+                    ok = registry.unregister(raw)
+                    def fn():
+                        # if they are singing tonight they are a walk-up again,
+                        # so they belong back in the guest list rather than in
+                        # neither (which would hide them and skip the yield rule)
+                        cur = next((n for n in state.singers
+                                    if n.casefold() == raw.casefold()), None)
+                        if ok and cur is not None and cur not in state.guests:
+                            state.guests.append(cur)
+                    state.mutate(songs, fn)
+                    return self._json({"ok": ok})
+                return self._json({"error": "unknown action"}, 400)
             if u.path == "/api/kj/list/default":
                 # tag (or clear, with a null/blank id) the Random-KJ pool list
                 lid = body.get("list_id") or None

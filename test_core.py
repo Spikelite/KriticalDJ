@@ -6,7 +6,7 @@ import zipfile
 from pathlib import Path
 
 from kriticaldj import (Flow, ListStore, SingerPrefs, SingerRegistry, State,
-                        Stats, VersionStore, clamp_range, key_tone_hz,
+                        Stats, VersionStore, clamp_range, guest_alias, key_tone_hz,
                         key_trusted, locked_count, move_entry, move_singer,
                         parse_key,
                         parse_title, pick_next, random_pool_track, random_song,
@@ -143,6 +143,63 @@ def test_snapshot_shapes():
         assert snap["phase"] == "idle"
         assert snap["next"]["singer"] == "Ann"  # rotation starts at cursor 0
         assert [e["singer"] for e in snap["upcoming"]] == ["Ann", "Bob"]
+
+
+def test_guest_alias():
+    assert guest_alias("Dave", {"dave"}) == "Dave-G"
+    assert guest_alias("Dave", {"dave", "dave-g"}) == "Dave-G2"
+    assert guest_alias("Dave", {"dave", "dave-g", "dave-g2"}) == "Dave-G3"
+    assert guest_alias("Dave", set()) == "Dave-G"   # nothing taken
+
+
+def test_registry_accounts():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "singers.json"
+        reg = SingerRegistry(p)
+        reg.resolve("Walkup")                       # an ordinary guest
+        assert reg.accounts() == []                 # guests are never listed
+        name, rid = reg.register("Dave")
+        assert (name, reg.accounts()) == ("Dave", ["Dave"])
+        assert reg.is_registered("dave") and not reg.is_registered("Walkup")
+        assert reg.register("DAVE") is None         # names are unique
+        # registering a familiar walk-up keeps their id, so stats stay attached
+        old = reg.lookup("Walkup")
+        assert reg.register("Walkup")[1] == old
+        assert sorted(reg.accounts()) == ["Dave", "Walkup"]
+        assert SingerRegistry(p).accounts() == ["Dave", "Walkup"]   # persists
+        # unregister drops the account, never the row or the id
+        assert reg.unregister("Dave") and not reg.is_registered("Dave")
+        assert reg.lookup("Dave") == rid
+        assert not reg.unregister("Dave")           # already a walk-up
+
+
+def test_registry_rename_keeps_id():
+    with tempfile.TemporaryDirectory() as td:
+        reg = SingerRegistry(Path(td) / "singers.json")
+        _, rid = reg.register("Dav")
+        assert reg.rename("Dav", "Dave") == "Dave"
+        assert reg.lookup("Dave") == rid and reg.lookup("Dav") is None
+        reg.register("Ann")
+        assert reg.rename("Dave", "Ann") is None    # target taken
+        assert reg.rename("Nobody", "X") is None    # unknown account
+
+
+def test_rename_singer_moves_whole_session():
+    with tempfile.TemporaryDirectory() as td:
+        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        st = State(Path(td) / "state.json")
+        st.mutate(songs, lambda: (st.singers.extend(["Dave", "Bob"]),
+                                  st.guests.append("Dave"),
+                                  st.performed.append("Dave"),
+                                  st.bumps.__setitem__("Dave", 1),
+                                  st.queue.extend([E(1, "Dave"), E(2, "Bob")])))
+        assert st.rename_singer("Dave", "Dave-G")
+        assert st.singers == ["Dave-G", "Bob"]      # keeps their rotation slot
+        assert [e["singer"] for e in st.queue] == ["Dave-G", "Bob"]
+        assert st.guests == ["Dave-G"] and st.performed == ["Dave-G"]
+        assert st.bumps == {"Dave-G": 1}            # fairness state follows them
+        assert not st.rename_singer("Nobody", "X")  # not in the rotation
+        assert not st.rename_singer("Dave-G", "Bob")  # target already singing
 
 
 def test_singer_registry_reattach():
