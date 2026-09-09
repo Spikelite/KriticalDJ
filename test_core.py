@@ -15,6 +15,19 @@ from kriticaldj import (Flow, ListStore, SingerPrefs, SingerRegistry, State,
 
 E = lambda i, s: {"id": i, "singer": s, "song_id": "x"}
 
+# the one-song library most tests need; State never mutates the mapping it is
+# handed, so a single shared constant cannot leak between tests
+SONGS = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+
+
+def leaf_values(obj):
+    """Every scalar stored anywhere in a nested JSON structure, as strings."""
+    if isinstance(obj, dict):
+        return [v for x in obj.values() for v in leaf_values(x)]
+    if isinstance(obj, list):
+        return [v for x in obj for v in leaf_values(x)]
+    return [str(obj)]
+
 
 def test_rotation_round_robin():
     singers = ["Ann", "Bob", "Cal"]
@@ -72,6 +85,8 @@ def test_scan_pairs_and_zips():
         vals = sorted(songs.values(), key=lambda s: s["title"])
         assert vals[0]["title"] == "Barbara Ann" and vals[0]["artist"] == "Beach Boys"
         assert vals[1]["title"] == "Bohemian Rhapsody" and vals[1]["artist"] == "Queen"
+        # a folder-scan song gets exactly one implicit version
+        assert len(vals[1]["versions"]) == 1
         assert vals[2]["title"] == "Kokomo" and "zip" in vals[2]
         # ids stable across rescans
         assert set(songs) == set(scan_library(str(root)))
@@ -166,7 +181,11 @@ def test_hash_pin_salted_and_verifiable():
     assert hash_pin("9999", s1)[0] != h1            # wrong pin does not
     h2, s2 = hash_pin("4821")
     assert s2 != s1 and h2 != h1                    # per-singer salt
-    assert "4821" not in h1 and len(h1) == 64       # nothing readable stored
+    # a 4-digit PIN is all hex characters, so "is the PIN a substring of the
+    # digest" is a coin flip that fails about 1 run in 1000. Assert the real
+    # property instead: a fixed-width hex digest that is not the PIN itself.
+    assert len(h1) == 64 and set(h1) <= set("0123456789abcdef")
+    assert h1 != "4821" and s1 != "4821"
 
 
 def test_registry_pin_lifecycle():
@@ -183,8 +202,9 @@ def test_registry_pin_lifecycle():
         assert not reg.check_pin("Dave", "0000")
         assert not reg.check_pin("Nobody", "4821")
         assert SingerRegistry(p).check_pin("Dave", "4821")   # survives restart
-        # the raw PIN is never written to disk
-        assert "4821" not in p.read_text(encoding="utf-8")
+        # the raw PIN is never written to disk. Checked by value rather than by
+        # substring: the digest is hex, so it can contain the digits by chance.
+        assert "4821" not in leaf_values(json.loads(p.read_text(encoding="utf-8")))
         assert reg.clear_pin("Dave") and not reg.has_pin("Dave")
         assert not reg.clear_pin("Dave")             # already clear
         # dropping the account takes any PIN with it
@@ -227,7 +247,7 @@ def test_registry_rename_keeps_id():
 
 def test_rename_singer_moves_whole_session():
     with tempfile.TemporaryDirectory() as td:
-        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        songs = SONGS
         st = State(Path(td) / "state.json")
         st.mutate(songs, lambda: (st.singers.extend(["Dave", "Bob"]),
                                   st.guests.append("Dave"),
@@ -261,7 +281,7 @@ def test_stats_events_and_skip_vs_complete():
         td = Path(td)
         reg = SingerRegistry(td / "singers.json")
         stats = Stats(td / "stats.jsonl", reg)
-        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        songs = SONGS
         st = State(td / "state.json")
         flow = Flow(st, songs, {"intermission_seconds": 1}, stats)
         st.mutate(songs, lambda: (st.singers.append("Ann"),
@@ -272,7 +292,8 @@ def test_stats_events_and_skip_vs_complete():
         st.mutate(songs, lambda: st.queue.append(E(2, "Ann")))
         flow._begin_next()                # -> started
         flow.song_ended()                 # -> completed
-        rows = [json.loads(l) for l in (td / "stats.jsonl").read_text().splitlines()]
+        rows = [json.loads(l) for l in
+                (td / "stats.jsonl").read_text(encoding="utf-8").splitlines()]
         assert [r["event"] for r in rows] == \
             ["queued", "started", "skipped", "started", "completed"]
         assert all(r["singer_id"] == rows[0]["singer_id"] for r in rows)
@@ -282,7 +303,7 @@ def test_stats_events_and_skip_vs_complete():
 def test_restart_current_bumps_transport_only():
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
-        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        songs = SONGS
         st = State(td / "state.json")
         flow = Flow(st, songs, {"intermission_seconds": 1})
         st.mutate(songs, lambda: (st.singers.append("Ann"),
@@ -305,7 +326,7 @@ def test_skip_to_singer_next_keeps_singer_and_rotation():
         td = Path(td)
         reg = SingerRegistry(td / "singers.json")
         stats = Stats(td / "stats.jsonl", reg)
-        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        songs = SONGS
         st = State(td / "state.json")
         flow = Flow(st, songs, {"intermission_seconds": 1}, stats)
         # Ann has two songs, Bob one; cursor starts at Ann
@@ -324,7 +345,8 @@ def test_skip_to_singer_next_keeps_singer_and_rotation():
         flow._begin_next()
         assert st.now["singer"] == "Bob" and st.now["id"] == 2
         # stats: started(1), skipped(1), started(3), completed(3), started(2)
-        rows = [json.loads(l) for l in (td / "stats.jsonl").read_text().splitlines()]
+        rows = [json.loads(l) for l in
+                (td / "stats.jsonl").read_text(encoding="utf-8").splitlines()]
         assert [r["event"] for r in rows] == \
             ["started", "skipped", "started", "completed", "started"]
 
@@ -332,7 +354,7 @@ def test_skip_to_singer_next_keeps_singer_and_rotation():
 def test_skip_to_singer_next_falls_back_when_alone():
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
-        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        songs = SONGS
         st = State(td / "state.json")
         flow = Flow(st, songs, {"intermission_seconds": 5})
         st.mutate(songs, lambda: (st.singers.append("Ann"),
@@ -345,7 +367,7 @@ def test_skip_to_singer_next_falls_back_when_alone():
 def test_pin_locks_next_against_late_adds():
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
-        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        songs = SONGS
         st = State(td / "state.json")
         flow = Flow(st, songs, {"intermission_seconds": 1})
         # Ann, Bob, Cal in rotation; only Cal has a song queued
@@ -372,7 +394,7 @@ def test_pin_locks_next_against_late_adds():
 
 def test_pin_recomputes_when_pinned_entry_removed():
     with tempfile.TemporaryDirectory() as td:
-        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        songs = SONGS
         st = State(Path(td) / "state.json")
         st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob"]),
                                   st.queue.extend([E(1, "Ann"), E(2, "Bob")])))
@@ -385,7 +407,7 @@ def test_pin_recomputes_when_pinned_entry_removed():
 
 def test_pin_untouched_by_skip_to_singer_next():
     with tempfile.TemporaryDirectory() as td:
-        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        songs = SONGS
         st = State(Path(td) / "state.json")
         flow = Flow(st, songs, {"intermission_seconds": 1})
         st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob"]),
@@ -734,17 +756,6 @@ def test_scan_versions_from_sidecar():
         assert "zip" in s["versions"][1] and s["versions"][1]["duration"] == 300
 
 
-def test_scan_single_version_backcompat():
-    with tempfile.TemporaryDirectory() as td:
-        root = Path(td)
-        d = root / "q"; d.mkdir()
-        (d / "Queen - Bohemian Rhapsody.mp3").write_bytes(b"m")
-        (d / "Queen - Bohemian Rhapsody.cdg").write_bytes(b"c")
-        s = list(scan_library(str(root)).values())[0]
-        # folder-scan libraries get exactly one implicit version
-        assert len(s["versions"]) == 1 and s["mp3"].endswith(".mp3")
-
-
 def test_version_store_persist_and_default():
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "versions.json"
@@ -767,7 +778,7 @@ def _force_deadline_past(st, songs):
 def test_intermission_holds_on_pause():
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
-        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        songs = SONGS
         st = State(td / "state.json")
         flow = Flow(st, songs, {"intermission_seconds": 5})
         st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob"]),
@@ -796,7 +807,7 @@ def test_intermission_holds_on_pause():
 def test_intermission_autoholds_when_queue_empty():
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
-        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        songs = SONGS
         st = State(td / "state.json")
         flow = Flow(st, songs, {"intermission_seconds": 5})
         st.mutate(songs, lambda: (st.singers.append("Ann"),
@@ -820,7 +831,7 @@ def test_intermission_autoholds_when_queue_empty():
 def test_manual_pause_wins_over_queue_add():
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
-        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        songs = SONGS
         st = State(td / "state.json")
         flow = Flow(st, songs, {"intermission_seconds": 5})
         st.mutate(songs, lambda: (st.singers.append("Ann"),
@@ -845,7 +856,7 @@ def test_manual_pause_wins_over_queue_add():
 def test_start_now_overrides_hold():
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
-        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        songs = SONGS
         st = State(td / "state.json")
         flow = Flow(st, songs, {"intermission_seconds": 5,
                                 "start_now_countdown_seconds": 1})
@@ -928,7 +939,7 @@ def test_add_singer_veteran_rejoin_appends():
 
 def test_performed_and_bump_reset_on_turn():
     with tempfile.TemporaryDirectory() as td:
-        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        songs = SONGS
         st = State(Path(td) / "s.json")
         flow = Flow(st, songs, {"intermission_seconds": 1})
         st.mutate(songs, lambda: (st.singers.append("Ann"),
@@ -953,7 +964,7 @@ def test_validate_config_bool_and_fairness():
 
 def test_manual_order_nudge_and_stickiness():
     with tempfile.TemporaryDirectory() as td:
-        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        songs = SONGS
         st = State(Path(td) / "state.json")
         st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob", "Cal"]),
                                   st.queue.extend([E(1, "Ann"), E(2, "Bob"), E(3, "Cal")])))
@@ -972,7 +983,7 @@ def test_manual_order_nudge_and_stickiness():
 
 def test_manual_order_bounds_and_unknown():
     with tempfile.TemporaryDirectory() as td:
-        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        songs = SONGS
         st = State(Path(td) / "state.json")
         st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob"]),
                                   st.queue.extend([E(1, "Ann"), E(2, "Bob")])))
@@ -984,7 +995,7 @@ def test_manual_order_bounds_and_unknown():
 
 def test_manual_order_reconciles_and_consumes():
     with tempfile.TemporaryDirectory() as td:
-        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        songs = SONGS
         st = State(Path(td) / "state.json")
         flow = Flow(st, songs, {"intermission_seconds": 1})
         st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob", "Cal"]),
@@ -1002,7 +1013,7 @@ def test_manual_order_reconciles_and_consumes():
 def test_manual_order_survives_restart():
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "state.json"
-        songs = {"x": {"artist": "A", "title": "T", "search": "a t"}}
+        songs = SONGS
         st = State(p)
         st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob", "Cal"]),
                                   st.queue.extend([E(1, "Ann"), E(2, "Bob"), E(3, "Cal")])))
@@ -1024,8 +1035,32 @@ def test_random_song_excludes_and_falls_back():
 
 
 if __name__ == "__main__":
-    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    import sys
+    import traceback
+
+    # optional substring filter:  python test_core.py list  runs the list tests
+    want = sys.argv[1] if len(sys.argv) > 1 else ""
+    fns = [v for k, v in sorted(globals().items())
+           if k.startswith("test_") and want in k]
+    if not fns:
+        print(f"no test matches {want!r}")
+        sys.exit(2)
+    failed = []
     for fn in fns:
-        fn()
-        print(f"  ok  {fn.__name__}")
+        try:
+            fn()
+            print(f"  ok  {fn.__name__}")
+        except Exception as exc:                 # keep going: report them all
+            frame = traceback.extract_tb(exc.__traceback__)[-1]
+            failed.append((fn.__name__, frame.lineno, frame.line, exc))
+            print(f"  FAIL  {fn.__name__}  (line {frame.lineno})")
+    if failed:
+        print()
+        print(f"{len(failed)} of {len(fns)} tests FAILED:")
+        for name, lineno, line, exc in failed:
+            detail = f"{exc.__class__.__name__}: {exc}".splitlines()[0]
+            print(f"  {name}")
+            print(f"    line {lineno}: {line}")
+            print(f"    {detail}")
+        sys.exit(1)
     print(f"{len(fns)} tests passed")
