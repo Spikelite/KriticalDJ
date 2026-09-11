@@ -422,10 +422,57 @@ folder scan otherwise. Small task on each side (song-sorter: extend
             honor-system app on a trusted LAN. The KJ clears forgotten PINs.
             Known gap: while an account has no PIN, anybody can set one on it.
 
+- [x] **Phase 10: test infrastructure** (#35, #36): the suite was in good
+      shape, the machinery around it was not.
+      - [x] **CI** (#35): there was no `.github/workflows` at all. `main` is
+            branch protected and needs a pull request, but nothing checked the
+            suite before that pull request merged, so the protection enforced
+            process and not correctness: a red suite could reach `main`
+            unnoticed and, on a project whose deployment is copying one file
+            onto the Pi before a party, be found at the party. The workflow
+            runs `test_core.py` on 3.9 and 3.13, both ends of the README's
+            "Python 3.9+" claim, which nothing else verified. Nothing to
+            install and nothing to cache; importing `kriticaldj` is itself the
+            syntax check for each version.
+      - [x] **Committed smoke harness** (#35): repeated live testing was done
+            by writing an ad hoc `urllib` client into a scratch directory and
+            throwing it away, several times over, and it is what actually
+            caught the endpoint-level bugs. It is now `smoke.py`: stdlib only,
+            takes `--port`, builds its own temp library and config, seeds a
+            party and asserts, 31 checks. Two traps that cost an hour each on
+            every rewrite are designed out and documented at the top of the
+            file rather than rediscovered: a non-native `music_root` indexes
+            ZERO songs instead of failing (the harness asserts the count before
+            anything else), and reading song ids through bash `mapfile -t`
+            leaves a trailing carriage return that poisons the JSON bodies (so
+            nothing goes through a shell). The app is copied into the
+            workspace, because the server writes `state.json` and friends next
+            to itself and a smoke run must never touch a real party's state.
+      - [x] **A clock for `Flow`** (#36): several intermission tests asserted
+            on wall clock values (`4.0 <= hold_remaining <= 5.0`), which
+            assumes the gap between two calls stays under a second. True on a
+            dev box, not promised on a Pi or a loaded CI runner, and adding CI
+            is exactly what starts running the suite in a loaded container.
+            `Flow` now reads time through an injected `clock` (default
+            `time.time`), so the tests drive it. The assertions got STRONGER,
+            not weaker: a hold can now be entered part way into an
+            intermission, which is the only way to tell resuming from the
+            frozen remainder apart from starting a fresh countdown. The old
+            range assertion passed that mutation; the new one fails on it.
+      - [x] **Test selection** (#36): kept the bespoke runner rather than
+            moving to `unittest`, and kept one file. Plain asserts and zero
+            dependencies are worth more here than free grouping. The substring
+            filter added with #32 now takes several terms and an `=exact`
+            form.
+
 ## Notes for future sessions
 
-- Tests: `python test_core.py` (stdlib, no pytest needed).
-- Smoke test: `python kriticaldj.py --config <cfg>` then curl the API.
+- Tests: `python test_core.py` (stdlib, no pytest needed). Filters:
+  `python test_core.py hold rotation` runs those areas, `=rotation_empty` runs
+  exactly that test. CI runs the suite on 3.9 and 3.13 for every pull request.
+- Smoke test: `python smoke.py`. It stands a real server up on a free port
+  against its own throwaway library and asserts over HTTP; read the two traps
+  at the top of that file before hand-rolling a live test instead.
 - The Final-final output tree's artist folders are lowercase (clean names);
   the scanner title-cases them for display. Song titles parse from the file
   stem (`CATALOG - Artist - Title` variants handled heuristically).
