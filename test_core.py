@@ -1,7 +1,6 @@
 """KriticalDJ core tests -- stdlib only, run with:  python test_core.py"""
 import json
 import tempfile
-import time
 import zipfile
 from pathlib import Path
 
@@ -769,10 +768,25 @@ def test_version_store_persist_and_default():
         assert VersionStore(p).get("xyz") == 3   # survives restart
 
 
-def _force_deadline_past(st, songs):
-    def fn():
-        st.deadline = time.time() - 1
-    st.mutate(songs, fn)
+class Clock:
+    """A stopped clock for Flow, advanced explicitly by the test.
+
+    The gap between two Flow calls is microseconds on a dev box and unbounded
+    on a loaded CI runner or the Pi, so asserting on a wall-clock range would
+    turn a scheduling stall into a red build (#36). Driving time instead makes
+    every countdown assertion exact, and lets a hold be entered PART WAY into
+    an intermission, which is the only way to tell resuming from the frozen
+    remainder apart from starting a fresh one.
+    """
+
+    def __init__(self, t: float = 1000.0):
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
 
 
 def test_intermission_holds_on_pause():
@@ -780,26 +794,27 @@ def test_intermission_holds_on_pause():
         td = Path(td)
         songs = SONGS
         st = State(td / "state.json")
-        flow = Flow(st, songs, {"intermission_seconds": 5})
+        clock = Clock()
+        flow = Flow(st, songs, {"intermission_seconds": 5}, clock=clock)
         st.mutate(songs, lambda: (st.singers.extend(["Ann", "Bob"]),
                                   st.queue.extend([E(1, "Ann"), E(2, "Bob")])))
         flow._begin_next()                    # Ann on stage
         flow.transport_cmd("pause")
         flow.song_ended()                     # enters intermission while paused
+        clock.advance(2)                      # 2 of the 5 seconds burn off
         flow.tick_once()
-        assert st.hold_remaining is not None  # frozen on entry
-        assert 4.0 <= st.hold_remaining <= 5.0
+        assert st.hold_remaining == 3.0       # frozen at what was left, not at 5
         assert st.snapshot(songs)["held"] is True
         # a passed deadline must NOT advance while held
-        _force_deadline_past(st, songs)
+        clock.advance(9)
         flow.tick_once()
         assert st.phase == "intermission" and st.now is None
-        # unpause resumes from the frozen remaining, then plays on expiry
+        # unpause resumes from the frozen remainder, then plays on expiry
         flow.transport_cmd("play")
         flow.tick_once()
         assert st.hold_remaining is None
-        assert st.deadline > time.time() + 3  # resumed with ~4-5s left
-        _force_deadline_past(st, songs)
+        assert st.deadline == clock() + 3.0   # the leftover 3s, not a fresh 5s
+        clock.advance(3)
         flow.tick_once()
         assert st.phase == "playing" and st.now["singer"] == "Bob"
 
@@ -809,21 +824,23 @@ def test_intermission_autoholds_when_queue_empty():
         td = Path(td)
         songs = SONGS
         st = State(td / "state.json")
-        flow = Flow(st, songs, {"intermission_seconds": 5})
+        clock = Clock()
+        flow = Flow(st, songs, {"intermission_seconds": 5}, clock=clock)
         st.mutate(songs, lambda: (st.singers.append("Ann"),
                                   st.queue.append(E(1, "Ann"))))
         flow._begin_next()                    # queue is now empty
         flow.song_ended()
+        clock.advance(1)
         flow.tick_once()
-        assert st.hold_remaining is not None  # auto-held: nothing queued
-        _force_deadline_past(st, songs)
+        assert st.hold_remaining == 4.0       # auto-held: nothing queued
+        clock.advance(9)
         flow.tick_once()
         assert st.phase == "intermission"     # parked, not idle
         # a queue add releases the hold automatically...
         st.mutate(songs, lambda: st.queue.append(E(2, "Ann")))
         flow.tick_once()
-        assert st.hold_remaining is None and st.deadline > time.time()
-        _force_deadline_past(st, songs)
+        assert st.hold_remaining is None and st.deadline == clock() + 4.0
+        clock.advance(4)
         flow.tick_once()                      # ...and the song plays
         assert st.phase == "playing" and st.now["id"] == 2
 
@@ -833,19 +850,20 @@ def test_manual_pause_wins_over_queue_add():
         td = Path(td)
         songs = SONGS
         st = State(td / "state.json")
-        flow = Flow(st, songs, {"intermission_seconds": 5})
+        clock = Clock()
+        flow = Flow(st, songs, {"intermission_seconds": 5}, clock=clock)
         st.mutate(songs, lambda: (st.singers.append("Ann"),
                                   st.queue.append(E(1, "Ann"))))
         flow._begin_next()
         flow.transport_cmd("pause")
         flow.song_ended()
         flow.tick_once()
-        assert st.hold_remaining is not None
+        assert st.hold_remaining == 5.0
         # queueing must NOT resume a manually paused countdown
         st.mutate(songs, lambda: st.queue.append(E(2, "Ann")))
         flow.tick_once()
-        assert st.hold_remaining is not None
-        _force_deadline_past(st, songs)
+        assert st.hold_remaining == 5.0       # untouched, not restarted either
+        clock.advance(9)
         flow.tick_once()
         assert st.phase == "intermission"     # still parked
         flow.transport_cmd("play")            # only Play releases it
@@ -858,8 +876,9 @@ def test_start_now_overrides_hold():
         td = Path(td)
         songs = SONGS
         st = State(td / "state.json")
+        clock = Clock()
         flow = Flow(st, songs, {"intermission_seconds": 5,
-                                "start_now_countdown_seconds": 1})
+                                "start_now_countdown_seconds": 1}, clock=clock)
         st.mutate(songs, lambda: (st.singers.append("Ann"),
                                   st.queue.extend([E(1, "Ann"), E(2, "Ann")])))
         flow._begin_next()
@@ -869,7 +888,8 @@ def test_start_now_overrides_hold():
         assert st.hold_remaining is not None
         flow.start_now()                      # explicit go beats the hold
         assert st.phase == "countdown" and st.hold_remaining is None
-        _force_deadline_past(st, songs)
+        assert st.deadline == clock() + 1.0   # the start-now countdown, not 5s
+        clock.advance(1)
         flow.tick_once()
         assert st.phase == "playing"
 
@@ -1038,12 +1058,24 @@ if __name__ == "__main__":
     import sys
     import traceback
 
-    # optional substring filter:  python test_core.py list  runs the list tests
-    want = sys.argv[1] if len(sys.argv) > 1 else ""
+    # optional filters:  python test_core.py list              the list tests
+    #                    python test_core.py hold rotation     both areas
+    #                    python test_core.py =rotation_empty   exactly that test
+    wants = sys.argv[1:]
+
+    def wanted(name: str) -> bool:
+        for w in wants:
+            if w.startswith("="):  # exact, test_ prefix optional
+                if w[1:] in (name, name[len("test_"):]):
+                    return True
+            elif w in name:
+                return True
+        return not wants
+
     fns = [v for k, v in sorted(globals().items())
-           if k.startswith("test_") and want in k]
+           if k.startswith("test_") and wanted(k)]
     if not fns:
-        print(f"no test matches {want!r}")
+        print(f"no test matches {' '.join(wants)!r}")
         sys.exit(2)
     failed = []
     for fn in fns:

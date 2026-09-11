@@ -1,0 +1,34 @@
+name: tests
+
+# main is branch protected and needs a pull request, but until now nothing
+# checked that the suite was green before that pull request merged: the
+# protection enforced process, not correctness (#35).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false   # a 3.9-only break should not hide a 3.13-only one
+      matrix:
+        # Both ends of the "Python 3.9+" claim in the README. Nothing else
+        # verifies the floor, and the Pi is the reason the floor is low.
+        python-version: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # The suite is stdlib only and finishes in a couple of seconds, so there
+      # is nothing to install and nothing worth caching. Importing kriticaldj
+      # is itself the syntax check for the server on this version.
+      - name: Run the core suite
+        run: python test_core.py

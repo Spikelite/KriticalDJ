@@ -1190,9 +1190,13 @@ class State:
 # Flow control: the server owns the clock
 
 class Flow:
-    def __init__(self, state: State, songs: dict, cfg: dict, stats: Stats = None):
+    def __init__(self, state: State, songs: dict, cfg: dict, stats: Stats = None,
+                 clock=time.time):
         self.state, self.songs, self.cfg = state, songs, cfg
         self.stats = stats
+        # Every deadline below is read through this, so tests can drive the
+        # countdown from a fake clock instead of racing the wall clock (#36).
+        self.clock = clock
 
     def _info(self, song_id: str) -> dict:
         s = self.songs.get(song_id, {})
@@ -1237,7 +1241,7 @@ class Flow:
                 ended.append(st.now)
             st.now = None
             st.phase = "intermission"
-            st.deadline = time.time() + self.cfg["intermission_seconds"]
+            st.deadline = self.clock() + self.cfg["intermission_seconds"]
         st.mutate(self.songs, fn)
         if ended and self.stats:
             self.stats.log(event, ended[0]["singer"], self._info(ended[0]["song_id"]))
@@ -1248,7 +1252,7 @@ class Flow:
         def fn():
             if st.phase in ("intermission", "idle"):
                 st.phase = "countdown"
-                st.deadline = time.time() + self.cfg["start_now_countdown_seconds"]
+                st.deadline = self.clock() + self.cfg["start_now_countdown_seconds"]
                 st.hold_remaining = None  # explicit go overrides any hold
         st.mutate(self.songs, fn)
 
@@ -1291,7 +1295,7 @@ class Flow:
             if nxt is None:  # nothing else from this singer: behave like a plain skip
                 st.now = None
                 st.phase = "intermission"
-                st.deadline = time.time() + self.cfg["intermission_seconds"]
+                st.deadline = self.clock() + self.cfg["intermission_seconds"]
                 return
             st.queue.remove(nxt)
             st.now = nxt
@@ -1324,15 +1328,15 @@ class Flow:
                           and st.phase != "intermission")
             due = (st.phase in ("intermission", "countdown")
                    and st.hold_remaining is None
-                   and time.time() >= st.deadline)
+                   and self.clock() >= st.deadline)
             idle_ready = st.phase == "idle" and st.rotation_preview(1)
         if enter_hold:
             def fn():
-                st.hold_remaining = max(0.0, st.deadline - time.time())
+                st.hold_remaining = max(0.0, st.deadline - self.clock())
             st.mutate(self.songs, fn)
         elif exit_hold:
             def fn():
-                st.deadline = time.time() + (st.hold_remaining or 0.0)
+                st.deadline = self.clock() + (st.hold_remaining or 0.0)
                 st.hold_remaining = None
             st.mutate(self.songs, fn)
         elif stale_hold:
@@ -1346,7 +1350,7 @@ class Flow:
             # first song of the night gets the intermission board + QR
             def fn():
                 st.phase = "intermission"
-                st.deadline = time.time() + self.cfg["intermission_seconds"]
+                st.deadline = self.clock() + self.cfg["intermission_seconds"]
             st.mutate(self.songs, fn)
 
     def tick_forever(self) -> None:

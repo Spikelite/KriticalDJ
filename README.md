@@ -225,7 +225,19 @@ In active use, with development driven by feedback from real parties. See
 [PLAN.md](PLAN.md) for the full phase history and the reasoning behind each
 mechanism.
 
-Run the tests: `python test_core.py` (stdlib only, no pytest needed).
+## Tests
+
+```text
+python test_core.py                  # the whole core suite, ~2 seconds
+python test_core.py hold rotation    # just those areas
+python test_core.py =rotation_empty  # exactly that test
+python smoke.py                      # live: a real server on a free port
+```
+
+Both are stdlib only, no pytest needed. `test_core.py` covers the model;
+`smoke.py` builds a throwaway library, runs the actual server against it and
+drives the API over HTTP, which is the layer where party-night bugs have
+lived. Every pull request runs the core suite on Python 3.9 and 3.13.
 
 ## Credits
 
