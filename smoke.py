@@ -37,6 +37,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import urllib.error
 import urllib.request
 import zipfile
@@ -353,12 +354,30 @@ def main():
         except Fatal as exc:
             FAILURES.append(("fatal", str(exc)))
             print("  FATAL " + str(exc))
+        except Exception:
+            # A response that changed shape raises here (a KeyError on a field
+            # that moved, say). Record it rather than letting it escape: an
+            # escaping traceback would skip the summary AND the server output
+            # below, which is where the explanation usually is.
+            print(traceback.format_exc())
+            FAILURES.append(("harness crashed",
+                             traceback.format_exc().strip().splitlines()[-1]))
     finally:
         proc.terminate()
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+            proc.wait(timeout=5)
+        # Drain the server now that it is gone. Handler tracebacks land on its
+        # stderr, folded into this pipe, and are usually the real explanation
+        # for a failed check, so surface them instead of dropping them.
+        server_out = proc.stdout.read() or ""
+        if FAILURES and server_out.strip():
+            print()
+            print("[smoke] server output:")
+            for line in server_out.strip().splitlines():
+                print("  | " + line)
         if args.keep:
             print("[smoke] workspace kept at %s" % tmp)
         else:

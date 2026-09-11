@@ -857,18 +857,21 @@ def test_manual_pause_wins_over_queue_add():
         flow._begin_next()
         flow.transport_cmd("pause")
         flow.song_ended()
-        flow.tick_once()
-        assert st.hold_remaining == 5.0
+        clock.advance(2)                      # the clock must MOVE between the
+        flow.tick_once()                      # two ticks below, or a re-freeze
+        assert st.hold_remaining == 3.0       # would recompute the same number
         # queueing must NOT resume a manually paused countdown
         st.mutate(songs, lambda: st.queue.append(E(2, "Ann")))
+        clock.advance(2)
         flow.tick_once()
-        assert st.hold_remaining == 5.0       # untouched, not restarted either
+        assert st.hold_remaining == 3.0       # untouched, not re-frozen at 1.0
         clock.advance(9)
         flow.tick_once()
         assert st.phase == "intermission"     # still parked
         flow.transport_cmd("play")            # only Play releases it
         flow.tick_once()
         assert st.hold_remaining is None
+        assert st.deadline == clock() + 3.0   # the remainder survived the add
 
 
 def test_start_now_overrides_hold():
