@@ -464,15 +464,58 @@ folder scan otherwise. Small task on each side (song-sorter: extend
             dependencies are worth more here than free grouping. The substring
             filter added with #32 now takes several terms and an `=exact`
             form.
+- [x] **Phase 11: every API route under test** (#34): after Phase 10, 25 of
+      the 34 exact API routes, plus the list and account sub-routes, `DELETE
+      /api/queue/<id>` and the event stream, were exercised by nothing, and
+      those include every account, PIN and list route where #25 to #27 lived.
+      - [x] **Where**: `smoke.py`, now run in CI. This widens #35's
+            unit-tests-only CI scope, deliberately: the request layer is where
+            the party-night bugs have lived, and a harness nobody runs is how
+            they kept getting through. It is a step in the existing job, not a
+            job of its own, so the required checks (named after that job)
+            cover it; a separate job would add check names branch protection
+            does not require, and smoke could fail and still merge.
+      - [x] **A second library** with an `index.json` sidecar, because that is
+            the only way to get alternate versions and per-copy keys. It is
+            kept apart from the first on purpose: when a sidecar exists the
+            scanner skips the folder walk ENTIRELY, so one combined library
+            would silently stop the existing pair-and-zip check testing the
+            folder walk. The run switches libraries through
+            `/api/setup/config`, which tests the switch itself and the guard
+            that refuses an empty `music_root` rather than strand the party.
+      - [x] **A still board**: reorder checks put Pause down BEFORE queueing.
+            A manual pause freezes the intermission and the scheduler checks
+            for a hold before the deadline, so nothing is consumed while the
+            board is read, with no race against the scheduler thread. The
+            up-next hand-off is checked on a board with no manual order,
+            because the KJ's nudges outrank the pin by design; checked after a
+            nudge, "next" is correctly not the pinned entry.
+      - [x] **The event stream** is read with `http.client`, because urllib
+            waits for a body that never ends. Deterministic: the server
+            registers the listener before writing the first snapshot, so a
+            change made after that first read is guaranteed to arrive, and
+            the socket timeout only bounds a failure.
+      - [x] **Contained failures**: each group runs inside `section()`, so a
+            response that changed shape stops that group and not the ones
+            after it.
+      - [x] **The static/ parent guard is load-bearing on Windows**, which
+            nothing tested. With it removed, a raw backslash path
+            (`/static/..` + backslash + `kriticaldj.py`) serves the server's
+            own source; the `%2F` and `../` forms never reach the guard at
+            all, so checks using only those passed with or without it. On
+            Linux a backslash is an ordinary filename character, so there the
+            guard is defense in depth and that check cannot fail.
 
 ## Notes for future sessions
 
 - Tests: `python test_core.py` (stdlib, no pytest needed). Filters:
   `python test_core.py hold rotation` runs those areas, `=rotation_empty` runs
-  exactly that test. CI runs the suite on 3.9 and 3.13 for every pull request.
+  exactly that test. CI runs it and `smoke.py` on 3.9 and 3.13 for every pull
+  request.
 - Smoke test: `python smoke.py`. It stands a real server up on a free port
-  against its own throwaway library and asserts over HTTP; read the two traps
-  at the top of that file before hand-rolling a live test instead.
+  against its own throwaway libraries and drives every API route over HTTP;
+  read the two traps at the top of that file before hand-rolling a live test
+  instead.
 - The Final-final output tree's artist folders are lowercase (clean names);
   the scanner title-cases them for display. Song titles parse from the file
   stem (`CATALOG - Artist - Title` variants handled heuristically).

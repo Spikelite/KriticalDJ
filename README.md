@@ -235,9 +235,10 @@ python smoke.py                      # live: a real server on a free port
 ```
 
 Both are stdlib only, no pytest needed. `test_core.py` covers the model;
-`smoke.py` builds a throwaway library, runs the actual server against it and
-drives the API over HTTP, which is the layer where party-night bugs have
-lived. Every pull request runs the core suite on Python 3.9 and 3.13.
+`smoke.py` builds throwaway libraries, runs the actual server against them
+and drives every API route over HTTP, including the live event stream,
+which is the layer where party-night bugs have lived. Every pull request
+runs both, on Python 3.9 and 3.13.
 
 ## Credits
 
