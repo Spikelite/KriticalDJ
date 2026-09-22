@@ -16,6 +16,10 @@ jobs:
   test:
     name: python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    # smoke.py runs a live server and reads a live event stream. Both are
+    # bounded by timeouts, but if something does wedge, fail in minutes rather
+    # than burn the six-hour default.
+    timeout-minutes: 10
     strategy:
       fail-fast: false   # a 3.9-only break should not hide a 3.13-only one
       matrix:
@@ -32,3 +36,14 @@ jobs:
       # is itself the syntax check for the server on this version.
       - name: Run the core suite
         run: python test_core.py
+      # The request-handling layer, against a real server on a spare port
+      # (#34). This deliberately widens #35's unit-tests-only scope: every bug
+      # found at a party so far lived in this layer, and a harness that only
+      # runs when somebody remembers is how that kept happening. It is a step
+      # in THIS job rather than a job of its own so that the required checks,
+      # named after this job, cover it; a separate job would add check names
+      # branch protection does not require, and smoke could fail and still
+      # merge. It also starts the server for real on each Python version,
+      # which importing the module never did.
+      - name: Run the smoke harness
+        run: python smoke.py
