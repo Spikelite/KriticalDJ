@@ -52,7 +52,8 @@ up-next call-out over the last 15 seconds, and a corner track timer.
 
 **The KJ console.** Transport (Play / Pause / Start over / Skip / Singer's
 next / Start now), live lyrics-sync nudges, the rotation with the locked
-up-next slot, per-song version pickers, sticky play-order arrows, an on-demand
+up-next slot, a version picker on every entry and on the song on stage (a
+corrected copy starts on Start over), sticky play-order arrows, an on-demand
 join QR, and singer and queue management, all behind the 4-digit PIN. Links
 from here reach the registered-singer and saved-list pages.
 

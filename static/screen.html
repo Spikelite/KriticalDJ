@@ -115,7 +115,16 @@ let STATE = null;
 let clockOff = 0;            // server_time - local time, for countdown accuracy
 let lastSeq = -1;            // transport command sequence already applied
 let curEntry = null;         // entry currently loaded on stage
+let curVer = null;           // the copy of it that is loaded (see effVer)
 let cdg = null, cdgReady = false;
+
+// The copy an entry resolves to: its own version if it carries one (a saved
+// list's duet, or a KJ pick), else the song's default. Single-version songs
+// have no vsel and resolve to null, which means "the only copy".
+function effVer(e) {
+  if (e.ver != null) return e.ver;
+  return e.vsel ? e.vsel - 1 : null;
+}
 const audio = new Audio();
 audio.preload = "auto";
 const ctx = $("cdg").getContext("2d");
@@ -159,9 +168,12 @@ async function loadSong(entry) {
   const tm = document.createElement("span");
   tm.id = "ptimer";
   $("playhdr").appendChild(tm);
-  // a queue entry may pin its own version (e.g. a saved-list duet); pass it so
-  // media resolves to that copy instead of the KJ's global pick
-  const vq = entry.ver != null ? "?v=" + entry.ver : "";
+  // Always name the copy, even when it is only the song's default. A KJ can
+  // change the version of the song on stage (#41), and Start over then has to
+  // fetch a URL that differs from the one already loaded, or the browser can
+  // hand back the old copy from its cache.
+  curVer = effVer(entry);
+  const vq = curVer != null ? "?v=" + curVer : "";
   audio.src = "/media/" + entry.song_id + "/mp3" + vq;
   try {
     const r = await fetch("/media/" + entry.song_id + "/cdg" + vq);
@@ -327,7 +339,13 @@ function apply() {
     lastSeq = st.transport.seq;
     if (isNew && st.phase === "playing") {
       if (st.transport.cmd === "pause") audio.pause();
-      else if (st.transport.cmd === "restart") { audio.currentTime = 0; tryPlay(); }
+      else if (st.transport.cmd === "restart") {
+        // A version picked while the song plays waits for Start over (#41):
+        // picking must never interrupt a performance, so it is only here that
+        // a different copy gets loaded, from the top, lyrics included.
+        if (effVer(st.now) !== curVer) loadSong(st.now);
+        else { audio.currentTime = 0; tryPlay(); }
+      }
       else tryPlay();
     }
   }

@@ -505,6 +505,31 @@ folder scan otherwise. Small task on each side (song-sorter: extend
             all, so checks using only those passed with or without it. On
             Linux a backslash is an ordinary filename character, so there the
             guard is defense in depth and that check cannot fail.
+- [x] **Phase 12: version picks that land** (#40, #41).
+      - [x] **The lock was not the cause** (#40). Reported as lock-in
+            stopping the KJ changing a song's version; reproduced first, and a
+            plainly queued locked entry changed fine. The failing case was an
+            entry carrying its OWN version (a saved-list track, or the KJ pick
+            pool): the picker only ever set the song's default, which an
+            entry's own version outranks, so the pick vanished. The modal also
+            marked the default as playing, telling the KJ it had worked. The
+            locked row was simply the one being fixed, moments before it
+            played. A pick now names its entry and reaches it, AND becomes the
+            song's default (decided: always both). The entry keeps what it is
+            given, so a later pick on another entry of the same song moves the
+            default without moving it. A refused pick is refused whole, never
+            half-applied.
+      - [x] **The song on stage** (#41). There was no control for it, and Start
+            over could not have switched copies anyway: the screen reloads only
+            when the entry changes, and restart only rewound the loaded
+            element. Decided: a pick waits for Start over, so a misclick can
+            never interrupt a performance. The screen now names the copy in
+            every media URL (a changed copy must not come back from cache under
+            the same URL), remembers which copy it loaded, and on Start over
+            loads the new one, audio and lyrics, or just rewinds when nothing
+            changed. The console shows "Start over to hear vN" until then. It
+            can only know that from what it has seen, so a console opened
+            after a pick shows no hint.
 
 ## Notes for future sessions
 

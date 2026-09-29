@@ -443,6 +443,8 @@ def run_checks(c, expected_songs, ws):
         raise Fatal("the sidecar library is not active, so every check after "
                     "this would run against the wrong songs")
     section("song versions", check_versions, c, ids)
+    section("version picks reach their entry (#40, #41)",
+            check_entry_versions, c, ids)
     section("key tone and singer prefs", check_key_tone, c, ids)
     section("accounts and PINs", check_accounts, c, ids)
     section("saved lists", check_lists, c, ids)
@@ -612,6 +614,95 @@ def check_versions(c, ids):
         r = c.post("/api/kj/version", req)
         check("version choice refused: %s" % why, r.status == 400, str(r.status))
     c.post("/api/kj/version", {"song_id": isl, "index": 0})   # back to the best
+
+
+def check_entry_versions(c, ids):
+    isl = ids["Islands In The Stream"]
+
+    def entry(eid):
+        st = c.get("/api/state").json
+        for e in st["queue"] + ([st["now"]] if st["now"] else []):
+            if e["id"] == eid:
+                return e
+        return {}
+
+    def default():
+        return c.get("/api/song_versions?song_id=%s" % isl).json["active"]
+
+    def heard(e):
+        """The copy the screen would fetch for this entry (1 best, 2 duet,
+        3 radio edit). Mirrors screen.html's effVer: the entry's own version,
+        else the song's default."""
+        v = e["ver"] if e.get("ver") is not None else e["vsel"] - 1
+        return c.get("/media/%s/mp3?v=%d" % (isl, v)).body[3]
+
+    def pick(eid, index, song=None):
+        return c.post("/api/kj/version", {"song_id": song or isl,
+                                          "index": index, "entry_id": eid})
+
+    # --- #40: a queued entry that carries its own version --------------------
+    hold_board(c)
+    lid = c.post("/api/lists", {"singer": "Nia", "name": "Nia Duets"}).json["id"]
+    c.post("/api/lists/%s/add" % lid, {"singer": "Nia", "song_id": isl,
+                                       "version": 1})
+    c.post("/api/lists/%s/queue" % lid, {"singer": "Nia"})
+    c.post("/api/queue", {"song_id": isl, "singer": "Oli"})     # a plain entry
+    st = c.get("/api/state").json
+    duet, plain = [e["id"] for e in st["queue"]]
+    check("a saved-list entry locked in as next carries its own version",
+          st["pinned"] == duet and entry(duet).get("ver") == 1, str(entry(duet)))
+    r = pick(duet, 2)
+    e = entry(duet)
+    check("a pick from its row reaches it, lock and all (#40)",
+          r.status == 200 and e.get("vsel") == 3 and e.get("ver") == 2,
+          "%s %s" % (r.status, e))
+    check("so that is the copy the screen fetches", heard(e) == 3, str(heard(e)))
+    check("and the pick becomes the song's default", default() == 2, str(default()))
+    check("which an entry with no version of its own follows",
+          entry(plain).get("vsel") == 3 and entry(plain).get("ver") is None,
+          str(entry(plain)))
+    pick(plain, 1)
+    check("a later pick on another entry moves the default",
+          default() == 1 and entry(plain).get("vsel") == 2,
+          "default=%s %s" % (default(), entry(plain)))
+    check("but not an entry the KJ already picked a copy for",
+          entry(duet).get("vsel") == 3, str(entry(duet)))
+
+    c.post("/api/queue", {"song_id": ids["Jolene"], "singer": "Pia"})
+    jolene = next(e["id"] for e in c.get("/api/state").json["queue"]
+                  if e["singer"] == "Pia")
+    before = default()
+    for eid, want, why in ((99999, 404, "an entry that has gone"),
+                           (jolene, 400, "an entry of a different song"),
+                           ("soon", 400, "a non-numeric entry")):
+        r = pick(eid, 0)
+        check("a pick for %s is refused whole" % why,
+              r.status == want and default() == before,
+              "%s default=%s" % (r.status, default()))
+
+    # --- #41: the song on stage ------------------------------------------------
+    settle(c)
+    c.post("/api/queue", {"song_id": isl, "singer": "Quin"})
+    st = wait_for(c, lambda s: s["phase"] == "playing", what="the song to start")
+    now_id, seq = st["now"]["id"], st["transport"]["seq"]
+    r = pick(now_id, 0)
+    st = c.get("/api/state").json
+    check("the KJ can change the version of the song on stage (#41)",
+          r.status == 200 and st["now"]["id"] == now_id
+          and st["now"].get("ver") == 0 and st["now"].get("vsel") == 1,
+          "%s %s" % (r.status, st["now"]))
+    check("picking neither restarts nor interrupts it",
+          st["phase"] == "playing" and st["transport"]["seq"] == seq,
+          "%s seq %s -> %s" % (st["phase"], seq, st["transport"]["seq"]))
+    check("the corrected copy is what Start over will fetch",
+          heard(st["now"]) == 1, str(heard(st["now"])))
+    c.post("/api/kj/restart")
+    st = c.get("/api/state").json
+    check("Start over keeps the same entry, on its new version",
+          st["now"]["id"] == now_id and st["now"].get("ver") == 0
+          and st["transport"]["cmd"] == "restart", str(st["now"]))
+    c.post("/api/kj/version", {"song_id": isl, "index": 0})   # back to the best
+    settle(c)
 
 
 def check_key_tone(c, ids):

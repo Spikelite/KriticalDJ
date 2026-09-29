@@ -18,6 +18,8 @@ h1 a:hover{color:var(--accent)}
 #qsum b{color:var(--text)}
 #status b{color:var(--accent)}
 #status .cd{color:var(--ok);font-weight:700;font-variant-numeric:tabular-nums}
+#status button{font-size:12px;padding:1px 8px;margin-left:8px;border-radius:7px;border:1px solid #3a3f47;background:var(--bg);color:var(--dim);cursor:pointer}
+#status .pend{color:var(--accent);margin-left:8px}
 .bar{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
 .bar button{font-size:16px;padding:12px 18px;border-radius:10px;border:1px solid #3a3f47;
  background:var(--bg);color:var(--text);cursor:pointer;min-width:86px}
@@ -90,7 +92,7 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 
 <div id="vov"><div id="vbox">
   <h3 id="vtitle"></h3>
-  <div class="sub">Pick the version to play. The choice is remembered.</div>
+  <div class="sub" id="vsub"></div>
   <div id="vlist"></div>
   <button class="cls" onclick="closeVersions()">Close</button>
 </div></div>
@@ -107,11 +109,13 @@ section h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spaci
 "use strict";
 const $ = id => document.getElementById(id);
 let STATE = null, CFG = {intermission_seconds: 30}, clockOff = 0;
+// the version of the song on stage that the screen has loaded (see render)
+let STAGE = {id: null, vsel: null, seq: null};
 
 fetch("/api/config").then(r=>r.json()).then(c=>{ CFG = c; $("party").textContent = c.party_name; });
 
 function api(cmd){ fetch("/api/kj/"+cmd, {method:"POST"}); }
-function post(path, body){ fetch(path, {method:"POST", body:JSON.stringify(body)}); }
+function post(path, body){ return fetch(path, {method:"POST", body:JSON.stringify(body)}); }
 function offset(d){ post("/api/kj/offset", {delta:d}); }
 function entryMove(id,d){ post("/api/kj/entry_move", {entry_id:id, dir:d}); }
 function singerMove(n,d){ post("/api/kj/singer_move", {name:n, dir:d}); }
@@ -121,17 +125,32 @@ function pinEntry(id){ post("/api/kj/pin", {entry_id:id}); }
 function logout(){ fetch("/api/kj/logout",{method:"POST"}).then(()=>location.reload()); }
 
 function fmtDur(d){ return d ? (Math.floor(d/60)+":"+String(d%60).padStart(2,"0")) : ""; }
-function openVersions(songId){
+// entryId is the queue entry, or the song on stage, that the pick is for, and
+// cur is the copy that entry resolves to. The mark goes on THAT copy, which is
+// not always the song's default: a saved-list entry can carry its own (#40).
+function openVersions(songId, entryId, cur, onStage){
   fetch("/api/song_versions?song_id="+encodeURIComponent(songId)).then(r=>r.json()).then(d=>{
     if(d.error) return;
+    if(cur==null) cur=d.active;
     $("vtitle").textContent = d.artist+" — "+d.title;
+    $("vsub").textContent = onStage
+      ? "Picks the copy for the song on stage, and makes it this song's default. It keeps playing the current copy until you press Start over."
+      : "Picks the copy this entry will play, and makes it this song's default.";
     const box=$("vlist"); box.textContent="";
     d.versions.forEach(v=>{
-      const row=document.createElement("div"); row.className="vrow"+(v.index===d.active?" act":"");
+      const row=document.createElement("div"); row.className="vrow"+(v.index===cur?" act":"");
       const g=document.createElement("div"); g.className="g";
       g.textContent="v"+(v.index+1)+" · "+v.label+(v.duration?("  ("+fmtDur(v.duration)+")"):""); row.appendChild(g);
-      if(v.index===d.active){ const t=document.createElement("span"); t.className="tag"; t.textContent="✓ playing"; row.appendChild(t); }
-      row.onclick=()=>{ post("/api/kj/version", {song_id:songId, index:v.index}); openVersions(songId); };
+      if(v.index===cur){ const t=document.createElement("span"); t.className="tag"; t.textContent=onStage?"✓ selected":"✓ playing"; row.appendChild(t); }
+      // wait for the change to land before redrawing, or the redraw can read
+      // the old state and show the pick as not taken
+      row.onclick=()=>{
+        post("/api/kj/version", {song_id:songId, index:v.index, entry_id:entryId})
+          .then(r=>r.json()).then(res=>{
+            if(res.error){ $("vsub").textContent=res.error; return; }
+            openVersions(songId, entryId, v.index, onStage);
+          });
+      };
       box.appendChild(row);
     });
     $("vov").classList.add("on");
@@ -175,6 +194,21 @@ function render(){
     s.appendChild(document.createTextNode("▶ PLAYING"+(st.transport.cmd==="pause"?" (paused)":"")+": "));
     const b = document.createElement("b"); b.textContent = st.now.singer; s.appendChild(b);
     s.appendChild(document.createTextNode(" — "+st.now.title));
+    if(st.now.nversions>1){
+      const nv = st.now.vsel||1;
+      // Which copy the screen has loaded. A pick made while the song plays is
+      // only heard after Start over (#41), so until then the console says so.
+      // This mirrors the screen's own rule: it loads a copy when the song
+      // changes, and on a Start over that follows a version change.
+      if(STAGE.id!==st.now.id) STAGE={id:st.now.id, vsel:nv, seq:st.transport.seq};
+      else if(st.transport.cmd==="restart" && st.transport.seq!==STAGE.seq){ STAGE.vsel=nv; STAGE.seq=st.transport.seq; }
+      const vb=mkbtn("⧉ v"+nv,"",()=>openVersions(st.now.song_id, st.now.id, nv-1, true));
+      vb.title="Change the version of the song on stage"; s.appendChild(vb);
+      if(nv!==STAGE.vsel){
+        const h=document.createElement("span"); h.className="pend";
+        h.textContent="↻ Start over to hear v"+nv; s.appendChild(h);
+      }
+    }
   } else {
     s.appendChild(document.createTextNode(phase+" "));
     const cd = document.createElement("span"); cd.className = "cd"; cd.id = "cd"; s.appendChild(cd);
@@ -224,7 +258,7 @@ function render(){
       p.title="Lock this in as the up-next slot"; r.appendChild(p);
     }
     if(e.nversions>1){
-      const vb=mkbtn("⧉ v"+(e.vsel||1),"",()=>openVersions(e.song_id));
+      const vb=mkbtn("⧉ v"+(e.vsel||1),"",()=>openVersions(e.song_id, e.id, (e.vsel||1)-1, false));
       vb.title="Playing version "+(e.vsel||1)+" of "+e.nversions+", click to change";
       r.appendChild(vb);
     }

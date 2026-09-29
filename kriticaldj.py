@@ -2277,10 +2277,37 @@ def make_handler(cfg: dict, cfg_path: Path, state: State, songs: dict, flow: Flo
                     return self._json({"error": "index must be a number"}, 400)
                 if idx < 0 or idx >= n:
                     return self._json({"error": "version out of range"}, 400)
-                versions.set(sid, idx)
-                # nudge the surfaces so a version swap shows up live
-                state.mutate(songs, lambda: None)
-                return self._json({"ok": True, "song_id": sid, "active": idx})
+                if body.get("entry_id") is None:
+                    versions.set(sid, idx)
+                    # nudge the surfaces so a version swap shows up live
+                    state.mutate(songs, lambda: None)
+                    return self._json({"ok": True, "song_id": sid, "active": idx})
+                # A pick made for one entry, queued or on stage, reaches THAT
+                # entry as well as becoming the song's default (#40, #41).
+                # Setting only the default is not enough: an entry loaded from a
+                # saved list or the KJ pick pool carries its own version, which
+                # outranks the default, so the pick used to vanish. The entry
+                # keeps the version it is given here, so a later pick on another
+                # entry of the same song moves the default without moving it.
+                eid = self._int_arg(body, "entry_id")
+                if eid is None:
+                    return self._json({"error": "entry_id must be a number"}, 400)
+                found = []
+                def fn():
+                    pool = list(state.queue) + ([state.now] if state.now else [])
+                    e = next((x for x in pool if x["id"] == eid), None)
+                    found.append(e)
+                    if e is None or e["song_id"] != sid:
+                        return          # refused whole: never half-applied
+                    e["version"] = idx  # on stage: heard from the next Start over
+                    versions.set(sid, idx)
+                state.mutate(songs, fn)
+                if found[0] is None:
+                    return self._json({"error": "that entry is no longer queued"}, 404)
+                if found[0]["song_id"] != sid:
+                    return self._json({"error": "that entry is a different song"}, 400)
+                return self._json({"ok": True, "song_id": sid, "active": idx,
+                                   "entry_id": eid})
             if u.path.startswith("/api/kj/account/"):
                 action = u.path.rsplit("/", 1)[1]
                 raw = (body.get("name") or "").strip()[:40]
