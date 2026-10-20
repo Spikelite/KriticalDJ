@@ -25,7 +25,7 @@ Then open, in a browser:
 | `/kiosk` | A shared walk-up device | The same songbook without a personal identity: pick a singer, pick a song, and the picker resets for the next person |
 | `/kj` | The KJ (host machine) | Play / Pause / Skip, Start-now, lyrics-sync nudge, queue and rotation management, join QR |
 | `/kj/lists` | The KJ | Moderate singers' saved lists and pick the pool the "KJ pick" button draws from |
-| `/kj/singers` | The KJ | Manage registered regulars: register, rename, remove |
+| `/kj/singers` | The KJ | Manage registered regulars: register, rename, remove, clear a forgotten PIN |
 | `/screen` | The TV/projector (fullscreen browser) | Lyrics during songs; NOW / NEXT / rotation + QR between songs |
 | `/setup` | The KJ, before/after the party | Rescan library, reset session, statistics, live config editing |
 
@@ -46,7 +46,7 @@ up-next call-out over the last 15 seconds, and a corner track timer.
 *(Playback shot below is a mockup. Lyric graphics come from your CDG files.)*
 
 <p>
-  <img src="docs/screen-board.png" width="49%" alt="TV intermission board: grab the mic, rotation, QR code">
+  <img src="docs/screen-board.png" width="49%" alt="TV intermission board: grab the mic, the song's key, rotation, QR code">
   <img src="docs/screen-play.png" width="49%" alt="TV playback view: CDG lyrics, singer header, up-next banner, track timer">
 </p>
 
@@ -62,13 +62,32 @@ from here reach the registered-singer and saved-list pages.
   <img src="docs/kj-lock.png" width="24%" alt="KJ PIN lock screen">
 </p>
 
-**Singers' phones and setup.** Guests search, browse, and queue from their own
-devices, and the name dropdown stops anyone queueing as someone else by
-accident. Setup handles the library, sessions, stats, and all config, live.
+**Saved lists and regulars.** At `/kj/lists` the KJ moderates singers' saved
+lists and stars the one the songbook's KJ pick button draws from. At
+`/kj/singers` they manage registered regulars, see who is here tonight, and
+clear a forgotten PIN.
 
 <p>
-  <img src="docs/singer.png" width="38%" alt="Singer UI on a phone: name dropdown, search, browse list">
+  <img src="docs/kj-lists.png" width="49%" alt="Saved lists page: lists grouped by singer, one starred as the KJ pick pool, a duet version pinned on a track">
+  <img src="docs/kj-singers.png" width="49%" alt="Registered singers page: regulars with here-tonight and PIN status, walk-up guests with register buttons">
+</p>
+
+**Singers' phones and setup.** Guests search, browse, and queue from their own
+devices, and the name dropdown stops anyone queueing as someone else by
+accident. Each singer sees their own songs and saved lists, and anyone can load
+another singer's list. Setup handles the library, sessions, stats, and all
+config, live.
+
+<p>
+  <img src="docs/singer.png" width="38%" alt="Singer UI on a phone: name dropdown, search, Random song and KJ pick, my songs, my lists, lists from other singers">
   <img src="docs/setup.png" width="55%" alt="Setup page: library rescan, session reset, statistics, editable configuration">
+</p>
+
+**The kiosk.** `/kiosk` turns a shared tablet into a walk-up songbook: pick a
+singer, pick a song, and it resets for the next person.
+
+<p>
+  <img src="docs/kiosk.png" width="80%" alt="Kiosk songbook on a tablet: singer picker, search, now and next, browse list">
 </p>
 
 ## Guests and regulars

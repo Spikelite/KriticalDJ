@@ -154,17 +154,18 @@ folder scan otherwise. Small task on each side (song-sorter: extend
       queued songs), per-singer queue FIFO reorder, two-step session reset,
       library rescan. *All endpoints smoke-tested end-to-end; browser pass
       pending user.* MVP COMPLETE: phases 1-4 all code-complete.
-- [~] **Phase 5: polish** (OPEN, user review findings land here):
+- [~] **Phase 5: polish** (only the on-hardware pass remains, tracked in #43):
       - [x] singer UI songbook-parity search: All/Artist/Song-title filter
             pills + A–Z artist browse (server: `field`/`letter` params on
             /api/songs with precomputed per-field search text).
       - [x] deployment docs: DEPLOY.md (Pi install, systemd service in
             deploy/kriticaldj.service, dual-screen Chromium kiosk lines,
             Bluetooth pairing + sync calibration, fstab nofail note).
-      - [ ] user's browser/hardware test-pass findings (TBD).
-      - [ ] GitHub upload (user does this after review).
-      - [ ] optional niceties only if wanted: volume duck on pause,
-            next-singer chime, config UI.
+      - [ ] user's browser/hardware test-pass findings: now issue #43, which
+            collects every on-hardware check still outstanding.
+      - [x] GitHub upload: on GitHub, released as v0.1.0 through v0.4.0.
+      - [x] optional niceties: the config UI became /setup. A volume duck on
+            pause and a next-singer chime were never asked for, so not built.
 - [x] **Phase 6: statistics system** (DONE 2026-07-03): records
       what gets picked and what actually gets played, tied to singer identity.
       - **Event log**: append-only `stats.jsonl`, one JSON line per event
@@ -190,7 +191,7 @@ folder scan otherwise. Small task on each side (song-sorter: extend
         registry everywhere; GET /api/stats/summary aggregates (events,
         sessions, top played/queued/singers) and /setup displays it.
 
-- [~] **Phase 7: UAT-feedback pass** (started 2026-07-04, chunked for the
+- [x] **Phase 7: UAT-feedback pass** (started 2026-07-04, chunked for the
       token budget; each chunk ends compilable + tested):
       - [x] **C1 singer UI**: name picker is a dropdown (placeholder default so
             nobody queues as someone else, remembered in localStorage, inline
@@ -235,7 +236,7 @@ folder scan otherwise. Small task on each side (song-sorter: extend
             power check, Class 1 dongle escalation, and the wired-aux
             endgame (USB DAC -> mixer aux, lyrics offset back to ~0).
             Doc-only chunk; no app code.
-      - [~] **C7 library data cleanup** (lives in song-sorter, not KDJ;
+      - [x] **C7 library data cleanup** (lives in song-sorter, not KDJ;
             KDJ reads index.json verbatim). Scanned the synced 164k-track
             cache. Verdicts: (a) **Coulton album**: 32 tracks mislabeled
             `Bz's Homemade`, songs already correct → alias added; (b) **Rocky
@@ -255,7 +256,9 @@ folder scan otherwise. Small task on each side (song-sorter: extend
             repeat *Refresh* fixes the 107/113 already cached (6 malformed
             stragglers left: MW-808/THK/LEG w/ catalog-internal dashes or no
             song). Verified against all 113 real stems + regressions.
-      - [~] **C8 multi-version songs (big)**: KriticalDJ consumer side DONE
+            Nothing is left on the KDJ side; the re-export steps above are
+            song-sorter's.
+      - [x] **C8 multi-version songs (big)**: KriticalDJ consumer side DONE
             + tested + browser-verified: index.json entries may carry an
             optional `versions: [{path,label,duration}]` alongside the best
             copy; scan builds a per-song `versions` list (v0 = best, mirrors
@@ -532,13 +535,31 @@ folder scan otherwise. Small task on each side (song-sorter: extend
             changed. The console shows "Start over to hear vN" until then. It
             can only know that from what it has seen, so a console opened
             after a pick shows no hint.
+- [x] **Released v0.4.0** (2026-10-11 PT), covering Phases 8 to 12. The
+      upgrade from v0.3.0 was tested for real first: a v0.3.0 party had its
+      power cut mid-song and v0.4.0 started on the same files with everyone
+      still in line.
+- [x] **Phase 13: closing out open work** (2026-10-20 PT).
+      - [x] **CI is now a required check** on `main` (`python 3.9` and
+            `python 3.13`, pinned to GitHub Actions). Phase 10 added CI but
+            left it advisory, so a red pull request could still merge.
+      - [x] **Folder-scanned titles** (#44): the July "Artist-Song-Artist"
+            report was this app's own `parse_title`; see C7 above.
+      - [x] **Screenshots** refreshed, and added for `/kiosk`, `/kj/lists` and
+            `/kj/singers`. Taken with headless Chrome against a throwaway copy
+            of the server, since the in-app browser cannot capture frames.
+      - [ ] **On-hardware pass** (#43): everything that needs the Pi, the TV,
+            Bluetooth or guests' phones, collected as one checklist.
+      - [ ] **Audio normalization** (#20): parked by Spike, its four open
+            decisions intact.
 
 ## Notes for future sessions
 
 - Tests: `python test_core.py` (stdlib, no pytest needed). Filters:
   `python test_core.py hold rotation` runs those areas, `=rotation_empty` runs
   exactly that test. CI runs it and `smoke.py` on 3.9 and 3.13 for every pull
-  request.
+  request, and both checks are REQUIRED: a pull request cannot merge until
+  they pass.
 - Smoke test: `python smoke.py`. It stands a real server up on a free port
   against its own throwaway libraries and drives every API route over HTTP;
   read the two traps at the top of that file before hand-rolling a live test
