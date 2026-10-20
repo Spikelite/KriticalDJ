@@ -169,7 +169,7 @@ def lan_url(cfg: dict) -> str:
 # --------------------------------------------------------------------------
 # Library scan
 
-_CATALOG_RE = re.compile(r"^[A-Za-z]{1,6}[\d][\w-]*$")  # SC8121-03, EZH-31, ...
+_CATALOG_RE = re.compile(r"^[A-Za-z]{1,6}[\d][\w-]*$")  # SC8121-03, SF042-11, ...
 
 
 def _norm(s: str) -> str:
@@ -189,14 +189,20 @@ def parse_title(stem: str, artist_hint: str) -> str:
         parts = parts[1:]
     if not parts:
         return stem
-    if len(parts) == 1:
-        return parts[0]
+    # Drop the artist wherever it appears, not just at one end: a stem like
+    # 'Artist - Song - Artist' otherwise keeps it in the title (#44).
     hint = _norm(artist_hint)
-    if hint and _norm(parts[0]) == hint:
-        return " - ".join(parts[1:])
-    if hint and _norm(parts[-1]) == hint:
-        return " - ".join(parts[:-1])
-    return " - ".join(parts[1:])
+    named = [p for p in parts if _norm(p) != hint] if hint else parts
+    found = bool(named) and len(named) < len(parts)
+    if found:
+        parts = named
+    elif len(parts) > 1:
+        parts = parts[1:]           # no artist match: presume it leads
+    # a bare track number left in front ('SC8121 - 03 - Song') is not title,
+    # unless it is all that is left ('Prince - 7')
+    if len(parts) > 1 and parts[0].isdigit() and len(parts[0]) <= 3:
+        parts = parts[1:]
+    return " - ".join(parts)
 
 
 def scan_library(music_root: str) -> dict:
