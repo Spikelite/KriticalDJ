@@ -60,7 +60,25 @@ def test_parse_title():
     assert parse_title("Beach Boys - Barbara Ann", "Beach Boys") == "Barbara Ann"
     assert parse_title("Barbara Ann - Beach Boys", "Beach Boys") == "Barbara Ann"
     assert parse_title("Barbara Ann", "Beach Boys") == "Barbara Ann"
-    assert parse_title("EZH-31 - 04 - Milkshake", "Kelis") == "04 - Milkshake"
+    assert parse_title("EZH-31 - 04 - Milkshake", "Kelis") == "Milkshake"
+
+
+def test_parse_title_drops_artist_and_track_number():
+    # the artist on both sides used to survive on one of them (#44)
+    assert parse_title("Beach Boys - Barbara Ann - Beach Boys", "Beach Boys") == "Barbara Ann"
+    # a track number after the catalog code is not part of the title
+    assert parse_title("SC8121 - 03 - Beach Boys - Barbara Ann", "Beach Boys") == "Barbara Ann"
+    # titles that ARE numbers survive, whichever side the artist is on
+    assert parse_title("SC1234-05 - Prince - 1999", "Prince") == "1999"
+    assert parse_title("Prince - 7", "Prince") == "7"
+    assert parse_title("22 - Taylor Swift", "Taylor Swift") == "22"
+    assert parse_title("SC123 - 05 - 22", "Taylor Swift") == "22"
+    # a title with its own dash keeps it
+    assert parse_title("Queen - Bohemian Rhapsody - Live", "Queen") == "Bohemian Rhapsody - Live"
+    # no artist hint (flat layout): the first segment is presumed to be it
+    assert parse_title("Queen - Bohemian Rhapsody", "") == "Bohemian Rhapsody"
+    # a stem that is only the artist's name is left alone, not emptied
+    assert parse_title("Beach Boys", "Beach Boys") == "Beach Boys"
 
 
 def test_scan_pairs_and_zips():

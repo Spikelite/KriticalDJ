@@ -244,8 +244,10 @@ folder scan otherwise. Small task on each side (song-sorter: extend
             menu on prod (39 tracks) then re-export. (c) `[SF Karaoke]`/
             `[DMG Karaoke]` brackets: 0 in current cache, already gone; a
             stale index.json on the Pi just needs a re-export. (d)
-            `Artist-Song-Artist`: 0 in source data; likely a KDJ display
-            artifact, awaiting a concrete example. (e) **catalog-tag leaks**:
+            `Artist-Song-Artist`: 0 in source data, and it was a KDJ
+            artifact: `parse_title`, used only when a library is folder-scanned
+            without an index.json, removed the artist from one end of the stem
+            only and kept bare track numbers. Fixed in #44. (e) **catalog-tag leaks**:
             FIXED in song-sorter main.py: `_parse_artist_song` now handles
             compact `CATALOG-TRACK-ARTIST-SONG` stems (no spaces, e.g.
             `DIS61201-13-MARY POPPINS-...`) via `_COMPACT_CATALOG_RE`, and
